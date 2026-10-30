@@ -2,6 +2,32 @@
 
 A local-first, GCP-aligned machine learning intelligence platform for synthetic financial crime analytics, covering fraud detection, AML risk scoring, anomaly detection, graph risk, NLP alert triage, monitoring, governance evidence, and cloud architecture design.
 
+## Upgrade M1: Traceable Fraud Evaluation
+
+The original 12 milestones and committed sample artifacts are preserved. The
+inherited `outputs/sample/model_metrics.json` and model card are **legacy
+demonstrations affected by target-derived features and future aggregates**.
+Static governance audit records simulate completed events; checklist status means
+an evidence path exists, not that a control was verified.
+
+Use the separate evaluation path for new local fraud-baseline evidence:
+
+```bash
+python3 -m financial_crime_ml.cli evaluate-fraud --run-id m1-review
+```
+
+It reads raw transaction observations with a fixed feature allowlist, trains on
+the earliest window, selects a threshold on a later validation window, and
+evaluates the final test window once. Actual run evidence is saved under ignored
+`outputs/runs/m1-review/`. Run IDs cannot be reused. Committed samples are not
+rewritten. This remains synthetic local evaluation, not production fraud evidence.
+
+See [evaluation methodology](docs/modelling.md),
+[inherited baseline and donor provenance](docs/upgrade/baseline.md),
+[capability boundaries](docs/upgrade/capability_matrix.md),
+[architecture decision](docs/architecture_decisions/ADR-001-upgrade-in-place.md), and
+[executed validation](docs/upgrade/validation.md).
+
 ## Problem Statement
 
 Financial institutions need to detect suspicious behaviour across customers, accounts, transactions, beneficiaries, devices, alerts, and case narratives. Financial crime teams must prioritise noisy alert queues, identify emerging typologies, explain risk decisions, monitor model behaviour, and retain evidence for governance and audit review.
@@ -80,6 +106,9 @@ If your environment uses `python3` rather than `python`, run the equivalent `pyt
 ## End-to-End Demo
 
 Run the full local workflow:
+
+This legacy demo overwrites sample paths. During upgrade validation, run it only
+in a disposable copy. Use `evaluate-fraud` above in the working repository.
 
 ```bash
 bash scripts/run_all_local.sh

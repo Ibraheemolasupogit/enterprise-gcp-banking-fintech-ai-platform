@@ -29,6 +29,12 @@ def get_status_message() -> str:
 def main(argv: list[str] | None = None) -> None:
     """Run a simple project command."""
     args = list(sys.argv[1:] if argv is None else argv)
+    if args and args[0] == "evaluate-fraud":
+        from financial_crime_ml.evaluation.fraud_baseline import evaluation_main
+
+        evaluation_main(args[1:])
+        return
+
     if args == ["generate-data"]:
         written_files = generate_all_datasets()
         for dataset_name, file_path in written_files.items():

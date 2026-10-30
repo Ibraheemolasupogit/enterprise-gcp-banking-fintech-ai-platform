@@ -117,8 +117,17 @@ reporting. No live GCP governance tooling is implemented.
     return path
 
 
-def run_governance_pack_workflow() -> dict[str, Any]:
-    """Generate governance controls, risk assessment, evidence, audit, and reports."""
+def run_governance_pack_workflow(output_dir: str | Path | None = None) -> dict[str, Any]:
+    """Generate legacy demonstration reports, optionally outside the sample folders.
+
+    With output_dir, preserve the outputs/sample and reports/sample hierarchy below
+    that directory. Evidence references still describe inherited repository samples;
+    they are not an execution attestation. None preserves the legacy CLI contract.
+    """
+    paths = {
+        key: resolve_repo_path(value) if output_dir is None else Path(output_dir).resolve() / value
+        for key, value in OUTPUT_PATHS.items()
+    }
     config = load_governance_config()
     checklist = build_control_checklist(config)
     assessments = build_model_risk_assessment()
@@ -126,22 +135,22 @@ def run_governance_pack_workflow() -> dict[str, Any]:
     traceability = build_lifecycle_traceability()
     audit_events = build_audit_events()
 
-    checklist_path = _write_json(checklist, OUTPUT_PATHS["control_checklist"])
-    assessment_path = _write_json(assessments, OUTPUT_PATHS["model_risk_assessment"])
-    inventory_path = _write_json(inventory, OUTPUT_PATHS["evidence_inventory"])
-    traceability_path = _write_json(traceability, OUTPUT_PATHS["lifecycle_traceability"])
-    audit_log_path = write_audit_log(audit_events, OUTPUT_PATHS["audit_log"])
+    checklist_path = _write_json(checklist, paths["control_checklist"])
+    assessment_path = _write_json(assessments, paths["model_risk_assessment"])
+    inventory_path = _write_json(inventory, paths["evidence_inventory"])
+    traceability_path = _write_json(traceability, paths["lifecycle_traceability"])
+    audit_log_path = write_audit_log(audit_events, paths["audit_log"])
     evidence_pack_path = generate_governance_evidence_pack(
         checklist,
         assessments,
         inventory,
         traceability,
-        OUTPUT_PATHS["governance_evidence_pack"],
+        paths["governance_evidence_pack"],
     )
     model_risk_report_path = generate_model_risk_management_report(
         checklist,
         assessments,
-        OUTPUT_PATHS["model_risk_management_report"],
+        paths["model_risk_management_report"],
     )
 
     return {

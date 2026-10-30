@@ -2,6 +2,12 @@
 
 The governance evidence pack consolidates controls, model risk assessments, evidence inventory, audit log, lifecycle traceability, and markdown reports for the synthetic financial crime ML platform.
 
+These inherited artifacts are **legacy demonstrations**. The audit generator
+unconditionally emits completed events at a fixed timestamp; it does not observe
+pipeline execution. Checklist success tests path existence, not control
+effectiveness. Upgrade M1 preserves the committed samples and records genuine
+fraud-evaluation execution separately in `outputs/runs/<run-id>/manifest.json`.
+
 ## Evidence Pack Structure
 
 - Governance control checklist
@@ -14,7 +20,15 @@ The governance evidence pack consolidates controls, model risk assessments, evid
 
 ## Audit Log Design
 
-The audit log is a local JSONL artefact with deterministic timestamps. It records major lifecycle events from data generation through governance pack generation.
+The audit log is a local JSONL simulation with deterministic timestamps and
+illustrative lifecycle events. It is not an execution attestation.
+
+For isolated generation, call
+`run_governance_pack_workflow(output_dir=temporary_directory)`. All generated
+files retain their `outputs/sample/` or `reports/sample/` hierarchy under that
+directory. Evidence references still point to inherited repository artifacts.
+The no-argument legacy API/CLI remains unchanged. Governance tests always supply
+temporary output directories.
 
 ## Lifecycle Traceability
 

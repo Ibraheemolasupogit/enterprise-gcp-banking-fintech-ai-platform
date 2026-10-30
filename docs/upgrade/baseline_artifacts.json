@@ -1,0 +1,222 @@
+{
+  "schema_version": "1.0",
+  "baseline_revision": "27e955fbac442483dc90d6fa2722770fd9418ba7",
+  "hash_algorithm": "sha256",
+  "artifacts": [
+    {
+      "path": "data/processed/.gitkeep",
+      "size_bytes": 1,
+      "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+    },
+    {
+      "path": "data/processed/transaction_features.csv",
+      "size_bytes": 1806784,
+      "sha256": "8dab1deda60d59a66c116095cc0f5fa122d9624cc4a2e44990ef1828781df88b"
+    },
+    {
+      "path": "data/sample/.gitkeep",
+      "size_bytes": 1,
+      "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+    },
+    {
+      "path": "data/sample/accounts.csv",
+      "size_bytes": 44047,
+      "sha256": "30c78789130804fc0857051ddef0eacb38613f9e40712f1af784fa389b1a5ca5"
+    },
+    {
+      "path": "data/sample/alerts.csv",
+      "size_bytes": 128969,
+      "sha256": "d556c434ed3a5be449d4595d3cbf3eb4a5dd67c27f1952a677c5ca820ac24176"
+    },
+    {
+      "path": "data/sample/beneficiaries.csv",
+      "size_bytes": 31818,
+      "sha256": "e645e39168159095e6d12585244c85f618c30515800fbb4fb0dd917b953c0bf6"
+    },
+    {
+      "path": "data/sample/case_notes.csv",
+      "size_bytes": 125948,
+      "sha256": "fe64fc000b6155e67eb0c274243edfec2fc338241bb957d0f8b256f9025acc4f"
+    },
+    {
+      "path": "data/sample/customers.csv",
+      "size_bytes": 29066,
+      "sha256": "cabfcdae881c764732141f52047d238335f47dba3ff14c5902bb5f80c9e8f8b5"
+    },
+    {
+      "path": "data/sample/devices.csv",
+      "size_bytes": 24112,
+      "sha256": "76d61b425e77693d82187e7480fa725d4b2ab2bcc6f708d905abfdefa375911a"
+    },
+    {
+      "path": "data/sample/transactions.csv",
+      "size_bytes": 664710,
+      "sha256": "8d12872dd1a0472ea8a12d6612422326039f17625a424a07d8b9f55921229bed"
+    },
+    {
+      "path": "outputs/sample/.gitkeep",
+      "size_bytes": 1,
+      "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+    },
+    {
+      "path": "outputs/sample/alert_quality_summary.json",
+      "size_bytes": 1296,
+      "sha256": "67e04ed42cdaa2a160e5f4b1f8407cb2cc1defd1dd82fb5e5e05beb7c039f8e3"
+    },
+    {
+      "path": "outputs/sample/aml_risk_scores.csv",
+      "size_bytes": 417744,
+      "sha256": "44195747612bce4ae0d12dd7c34afe5a3de9e50a23f9a92a74d61eeb1ab335a3"
+    },
+    {
+      "path": "outputs/sample/anomaly_scores.csv",
+      "size_bytes": 565068,
+      "sha256": "6bf60df5df824045f1a26e90aab9b4c56642ca80ed133284044d3587221c1f6d"
+    },
+    {
+      "path": "outputs/sample/anomaly_summary.json",
+      "size_bytes": 912,
+      "sha256": "54ee84253cc2b9188f64530b4c76ea38810cb98a1bcbfba841a4075cb026fc72"
+    },
+    {
+      "path": "outputs/sample/audit_log.jsonl",
+      "size_bytes": 3158,
+      "sha256": "0c9e236e90a3784302f3a586c0cdd66315fa084dfdb9acd5e0b425737b93c895"
+    },
+    {
+      "path": "outputs/sample/data_drift_summary.csv",
+      "size_bytes": 5906,
+      "sha256": "12af798e13781a199caa9dc64541ff76dd057862815447e607a625f36455564f"
+    },
+    {
+      "path": "outputs/sample/data_quality_report.json",
+      "size_bytes": 2190,
+      "sha256": "10377812e2dbe9659a93c9ad5babc0607b134cb5ac549b6bb3cd8ae51689a586"
+    },
+    {
+      "path": "outputs/sample/evidence_inventory.json",
+      "size_bytes": 9583,
+      "sha256": "951e6563b363c3d97a8e76b5970af670dd1189ba2c5ff07159d90a83a82777c1"
+    },
+    {
+      "path": "outputs/sample/feature_summary.json",
+      "size_bytes": 3840,
+      "sha256": "57a529ab67b126479027bbd1fe27b07f535929778ebbcab874363ac319af0f0c"
+    },
+    {
+      "path": "outputs/sample/fraud_predictions.csv",
+      "size_bytes": 78387,
+      "sha256": "76c09b158e1f958c5c070ed21767925e2105d6c3155049a0859c46f0565b80e9"
+    },
+    {
+      "path": "outputs/sample/governance_control_checklist.json",
+      "size_bytes": 8121,
+      "sha256": "98159631844263e074d119397b88990d6f2caf2922b0053d4ba6f1c8e558961d"
+    },
+    {
+      "path": "outputs/sample/high_risk_anomalies.csv",
+      "size_bytes": 32533,
+      "sha256": "7a2d8c2e3056488c958d57901b38841de8a35f1d15b17a6446bf5011877071ee"
+    },
+    {
+      "path": "outputs/sample/high_risk_networks.csv",
+      "size_bytes": 52040,
+      "sha256": "5cd056c4f2fd005f0b8e4f5357a9084d7ee96a23b7a69103c2cb61d6ff501819"
+    },
+    {
+      "path": "outputs/sample/lifecycle_traceability.json",
+      "size_bytes": 4939,
+      "sha256": "83c8a42b154e7683920f33ea39b958a5307c208a5f0896a6736b071c5a4512b6"
+    },
+    {
+      "path": "outputs/sample/model_metrics.json",
+      "size_bytes": 674,
+      "sha256": "994e2d6c3e52766052f9da3715f51b02a2245ebacfecf29b1cb0d6429d3356f7"
+    },
+    {
+      "path": "outputs/sample/model_risk_assessment.json",
+      "size_bytes": 7739,
+      "sha256": "76d019f24dc7afd79c110431bb4a360563c00754966d190195d2e867bbd46a2f"
+    },
+    {
+      "path": "outputs/sample/monitoring_summary.json",
+      "size_bytes": 976,
+      "sha256": "3493d44e0993210b39064c89d6a60d10d40fb6db575d41f66c43a97a112ea8a1"
+    },
+    {
+      "path": "outputs/sample/network_risk_scores.csv",
+      "size_bytes": 1378183,
+      "sha256": "d4238399200ac372a5de8dadba8468e2921830e5498a7eb798cd632f4e02bf3f"
+    },
+    {
+      "path": "outputs/sample/network_summary.json",
+      "size_bytes": 1227,
+      "sha256": "bd0de337e0f62702b9cb6b385f86a2d9a36ace439dcaa14d2a2e6ad6ee2a6d6f"
+    },
+    {
+      "path": "outputs/sample/nlp_alert_triage.csv",
+      "size_bytes": 244582,
+      "sha256": "1a1abdefffcebd582d9ceff974a17cffa47aa43f5d0dd8f21f160a3a7d2bf8db"
+    },
+    {
+      "path": "outputs/sample/nlp_case_note_classifications.csv",
+      "size_bytes": 161877,
+      "sha256": "24cae6bfefbac22fa97d11a58724633c589256d6a73acb6027ff14405fd6708c"
+    },
+    {
+      "path": "outputs/sample/nlp_summary.json",
+      "size_bytes": 1186,
+      "sha256": "e4d3fa0175f10ab344402a62032e44bdb42ee0b4084a01662501df84ce7ed355"
+    },
+    {
+      "path": "outputs/sample/prediction_monitoring_summary.json",
+      "size_bytes": 2199,
+      "sha256": "56424dcb93af3dc08bd096357275af86bb3dc288b437d0b15361fbdd5672ffe5"
+    },
+    {
+      "path": "outputs/sample/prioritised_alerts.csv",
+      "size_bytes": 130096,
+      "sha256": "4dda4f956fe891c9dc10fc8876bae7b23bbec1aa5340ab4499e6ec8051400df8"
+    },
+    {
+      "path": "reports/sample/.gitkeep",
+      "size_bytes": 1,
+      "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+    },
+    {
+      "path": "reports/sample/anomaly_detection_report.md",
+      "size_bytes": 2855,
+      "sha256": "15341d3e6ad5218a6a5c44955c3d188d7d2b2ac78bbaa95b424589d27502fc0e"
+    },
+    {
+      "path": "reports/sample/governance_evidence_pack.md",
+      "size_bytes": 2758,
+      "sha256": "9b889ba0788846e27e308e60e36beabccd0b1400655fbb81ac670ca26a638f58"
+    },
+    {
+      "path": "reports/sample/model_card.md",
+      "size_bytes": 3994,
+      "sha256": "9f0a0b5c7f1f211f56ee4a67495226b1e91e90f22bcad9bb02887a2f1494d36a"
+    },
+    {
+      "path": "reports/sample/model_monitoring_report.md",
+      "size_bytes": 3742,
+      "sha256": "c68d16df762a525887f9b2ee147953f05754327e313aea46ad8cb9e7db4a3867"
+    },
+    {
+      "path": "reports/sample/model_risk_management_report.md",
+      "size_bytes": 2535,
+      "sha256": "a2a3f3b9c3694dba990c699510aa0df1c5a157a946b6c70ec6c288af63bb528f"
+    },
+    {
+      "path": "reports/sample/network_risk_report.md",
+      "size_bytes": 1883,
+      "sha256": "824cb44ded850fc9b32de42816ff004ad764870ad013a2125a6792d082c760ff"
+    },
+    {
+      "path": "reports/sample/nlp_alert_triage_report.md",
+      "size_bytes": 2221,
+      "sha256": "6b23cb9332692a914ef065465caf771e5cc375b4a225fea861e4a781282902c3"
+    }
+  ]
+}

@@ -2,6 +2,11 @@
 
 This guide explains the most important generated artifacts and where they fit in the synthetic ML lifecycle.
 
+These are preserved legacy demonstrations. Inherited fraud metrics include
+label-derived and future-aggregate leakage; governance logs are simulated and
+checklist status is based on path existence. Upgrade M1 evaluation evidence lives
+separately under ignored `outputs/runs/`; see [modelling](modelling.md).
+
 | Output | What it represents | Why it matters | Lifecycle stage |
 | --- | --- | --- | --- |
 | `data/sample/*.csv` | Synthetic customers, accounts, transactions, beneficiaries, devices, alerts, and case notes | Provides safe local input data without real customer information | Data generation |

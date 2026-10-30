@@ -2,6 +2,14 @@
 
 Use this index to navigate the project documentation.
 
+## Upgrade M1
+
+- [Inherited baseline, hashes and donor provenance](upgrade/baseline.md)
+- [Capability evidence boundaries](upgrade/capability_matrix.md)
+- [Upgrade-in-place decision](architecture_decisions/ADR-001-upgrade-in-place.md)
+- [Executed validation](upgrade/validation.md)
+- [Isolated fraud evaluation](modelling.md)
+
 ## Core Architecture
 
 - [Architecture overview](architecture.md)

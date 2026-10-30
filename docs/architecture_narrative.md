@@ -12,7 +12,9 @@ This mirrors the production need for governed landing zones, validation gates, r
 
 ## ML Lifecycle
 
-The feature layer produces transaction-level engineered features, including amount, time, velocity, customer, account, beneficiary, device, and typology indicators. The supervised fraud classifier uses transparent scikit-learn modelling and excludes identifiers, raw text, helper fields, and target leakage.
+The legacy feature layer produces transaction-level engineered features, including amount, time, velocity, customer, account, beneficiary, device, and typology indicators. Although raw helper fields are excluded from the legacy classifier, derived labels and full-dataset aggregates leak into its model inputs. Its metrics remain historical demonstrations.
+
+Upgrade M1 adds a separate evaluator over a fixed allowlist of raw transaction-time observations, with chronological train/validation/test windows, training-only preprocessing and validation-only threshold selection. It writes actual run evidence under ignored `outputs/runs/` and does not alter the inherited scoring chain. See `docs/modelling.md`.
 
 The design intentionally keeps model training lightweight so the repository remains understandable and reproducible.
 
