@@ -1,0 +1,9 @@
+flowchart LR
+    M2[Local M2 synthetic generation] --> M3[Local M3 validation and quarantine]
+    M3 --> M4[Local M4 SQLite reference and reconciliation]
+    M3 -. Approved upload only .-> GCS[Proposed regional versioned Storage bucket]
+    GCS -. Approved typed batch loads .-> BQ[Proposed BigQuery curated transactions and two dimensions]
+    BQ -. Approved transactional DML .-> Marts[Proposed four BigQuery daily marts]
+    Marts -. Logical reconciliation and evidence .-> M4
+    TF[Offline checked Terraform pending provider validation] -. Separate approved plan and apply .-> GCS
+    TF -. Separate approved plan and apply .-> BQ

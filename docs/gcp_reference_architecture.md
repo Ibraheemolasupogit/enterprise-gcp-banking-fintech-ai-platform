@@ -1,5 +1,7 @@
 # GCP Reference Architecture
 
+M5 scope note: this inherited broad reference is not the deployment inventory. The current [minimal readiness design](gcp_deployment_readiness.md) proposes only Storage, BigQuery and supporting IAM. Its Terraform is offline checked, pending provider validation and deployment approval. Other services below remain historical design concepts.
+
 ## Architecture Purpose
 
 This reference architecture describes how the local synthetic financial crime ML platform could map to a production-style Google Cloud Platform design. It is a deployment blueprint only: this repository does not create live GCP infrastructure, service accounts, APIs, BigQuery tables, Pub/Sub topics, Dataflow jobs, Vertex AI resources, or production dashboards.

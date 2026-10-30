@@ -1,0 +1,193 @@
+{
+  "accounts": [
+    {
+      "mode": "REQUIRED",
+      "name": "account_id",
+      "type": "STRING"
+    },
+    {
+      "mode": "REQUIRED",
+      "name": "customer_id",
+      "type": "STRING"
+    },
+    {
+      "mode": "REQUIRED",
+      "name": "base_currency",
+      "type": "STRING"
+    },
+    {
+      "mode": "REQUIRED",
+      "name": "opened_at",
+      "type": "TIMESTAMP"
+    },
+    {
+      "mode": "REQUIRED",
+      "name": "source_id",
+      "type": "STRING"
+    },
+    {
+      "mode": "REQUIRED",
+      "name": "source_time",
+      "type": "TIMESTAMP"
+    },
+    {
+      "mode": "REQUIRED",
+      "name": "ingestion_time",
+      "type": "TIMESTAMP"
+    },
+    {
+      "mode": "REQUIRED",
+      "name": "source_row",
+      "type": "INT64"
+    },
+    {
+      "mode": "REQUIRED",
+      "name": "source_sha256",
+      "type": "STRING"
+    }
+  ],
+  "curated_transactions": [
+    {
+      "mode": "REQUIRED",
+      "name": "transaction_id",
+      "type": "STRING"
+    },
+    {
+      "mode": "REQUIRED",
+      "name": "customer_id",
+      "type": "STRING"
+    },
+    {
+      "mode": "REQUIRED",
+      "name": "account_id",
+      "type": "STRING"
+    },
+    {
+      "mode": "REQUIRED",
+      "name": "beneficiary_id",
+      "type": "STRING"
+    },
+    {
+      "mode": "REQUIRED",
+      "name": "device_id",
+      "type": "STRING"
+    },
+    {
+      "mode": "REQUIRED",
+      "name": "transaction_timestamp",
+      "type": "TIMESTAMP"
+    },
+    {
+      "mode": "REQUIRED",
+      "name": "amount_minor",
+      "type": "INT64"
+    },
+    {
+      "mode": "REQUIRED",
+      "name": "amount",
+      "type": "STRING"
+    },
+    {
+      "mode": "REQUIRED",
+      "name": "currency",
+      "type": "STRING"
+    },
+    {
+      "mode": "REQUIRED",
+      "name": "transaction_type",
+      "type": "STRING"
+    },
+    {
+      "mode": "REQUIRED",
+      "name": "merchant_category",
+      "type": "STRING"
+    },
+    {
+      "mode": "REQUIRED",
+      "name": "origin_country",
+      "type": "STRING"
+    },
+    {
+      "mode": "REQUIRED",
+      "name": "destination_country",
+      "type": "STRING"
+    },
+    {
+      "mode": "REQUIRED",
+      "name": "channel",
+      "type": "STRING"
+    },
+    {
+      "mode": "REQUIRED",
+      "name": "customer_country",
+      "type": "STRING"
+    },
+    {
+      "mode": "REQUIRED",
+      "name": "source_id",
+      "type": "STRING"
+    },
+    {
+      "mode": "REQUIRED",
+      "name": "source_time",
+      "type": "TIMESTAMP"
+    },
+    {
+      "mode": "REQUIRED",
+      "name": "ingestion_time",
+      "type": "TIMESTAMP"
+    },
+    {
+      "mode": "REQUIRED",
+      "name": "source_row",
+      "type": "INT64"
+    },
+    {
+      "mode": "REQUIRED",
+      "name": "source_sha256",
+      "type": "STRING"
+    }
+  ],
+  "customers": [
+    {
+      "mode": "REQUIRED",
+      "name": "customer_id",
+      "type": "STRING"
+    },
+    {
+      "mode": "REQUIRED",
+      "name": "country",
+      "type": "STRING"
+    },
+    {
+      "mode": "REQUIRED",
+      "name": "onboarded_at",
+      "type": "TIMESTAMP"
+    },
+    {
+      "mode": "REQUIRED",
+      "name": "source_id",
+      "type": "STRING"
+    },
+    {
+      "mode": "REQUIRED",
+      "name": "source_time",
+      "type": "TIMESTAMP"
+    },
+    {
+      "mode": "REQUIRED",
+      "name": "ingestion_time",
+      "type": "TIMESTAMP"
+    },
+    {
+      "mode": "REQUIRED",
+      "name": "source_row",
+      "type": "INT64"
+    },
+    {
+      "mode": "REQUIRED",
+      "name": "source_sha256",
+      "type": "STRING"
+    }
+  ]
+}

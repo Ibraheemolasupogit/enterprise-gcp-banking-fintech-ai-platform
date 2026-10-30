@@ -1,0 +1,56 @@
+{
+  "output": {
+    "bucket_name": {
+      "value": "${google_storage_bucket.artifacts.name}"
+    }
+  },
+  "resource": {
+    "google_storage_bucket": {
+      "artifacts": {
+        "force_destroy": false,
+        "labels": "${var.labels}",
+        "lifecycle": {
+          "prevent_destroy": true
+        },
+        "location": "${var.region}",
+        "name": "${var.bucket_name}",
+        "project": "${var.project_id}",
+        "public_access_prevention": "enforced",
+        "soft_delete_policy": {
+          "retention_duration_seconds": 604800
+        },
+        "storage_class": "STANDARD",
+        "uniform_bucket_level_access": true,
+        "versioning": {
+          "enabled": true
+        }
+      }
+    },
+    "google_storage_bucket_iam_policy": {
+      "runner": {
+        "bucket": "${google_storage_bucket.artifacts.name}",
+        "policy_data": "${jsonencode({bindings = [{role = var.object_role, members = [\"serviceAccount:${var.runner_email}\"]}]})}"
+      }
+    }
+  },
+  "variable": {
+    "bucket_name": {
+      "type": "string"
+    },
+    "labels": {
+      "type": "map(string)"
+    },
+    "object_role": {
+      "type": "string"
+    },
+    "project_id": {
+      "type": "string"
+    },
+    "region": {
+      "type": "string"
+    },
+    "runner_email": {
+      "type": "string"
+    }
+  }
+}

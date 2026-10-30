@@ -1,0 +1,115 @@
+{
+  "output": {
+    "metadata_role": {
+      "value": "${google_project_iam_custom_role.metadata.name}"
+    },
+    "object_role": {
+      "value": "${google_project_iam_custom_role.objects.name}"
+    },
+    "reader_role": {
+      "value": "${google_project_iam_custom_role.readers.name}"
+    },
+    "runner_email": {
+      "value": "${google_service_account.runner.email}"
+    },
+    "table_role": {
+      "value": "${google_project_iam_custom_role.tables.name}"
+    }
+  },
+  "resource": {
+    "google_project_iam_custom_role": {
+      "jobs": {
+        "lifecycle": {
+          "prevent_destroy": true
+        },
+        "permissions": [
+          "bigquery.jobs.create",
+          "serviceusage.services.use"
+        ],
+        "project": "${var.project_id}",
+        "role_id": "${replace(var.prefix, \"-\", \"_\")}_jobs",
+        "stage": "GA",
+        "title": "Financial pilot jobs"
+      },
+      "metadata": {
+        "lifecycle": {
+          "prevent_destroy": true
+        },
+        "permissions": [
+          "bigquery.datasets.get"
+        ],
+        "project": "${var.project_id}",
+        "role_id": "${replace(var.prefix, \"-\", \"_\")}_metadata",
+        "stage": "GA",
+        "title": "Financial pilot metadata"
+      },
+      "objects": {
+        "lifecycle": {
+          "prevent_destroy": true
+        },
+        "permissions": [
+          "storage.buckets.get",
+          "storage.objects.create",
+          "storage.objects.get",
+          "storage.objects.list"
+        ],
+        "project": "${var.project_id}",
+        "role_id": "${replace(var.prefix, \"-\", \"_\")}_objects",
+        "stage": "GA",
+        "title": "Financial pilot objects"
+      },
+      "readers": {
+        "lifecycle": {
+          "prevent_destroy": true
+        },
+        "permissions": [
+          "bigquery.tables.get",
+          "bigquery.tables.getData"
+        ],
+        "project": "${var.project_id}",
+        "role_id": "${replace(var.prefix, \"-\", \"_\")}_readers",
+        "stage": "GA",
+        "title": "Financial pilot input readers"
+      },
+      "tables": {
+        "lifecycle": {
+          "prevent_destroy": true
+        },
+        "permissions": [
+          "bigquery.tables.get",
+          "bigquery.tables.getData",
+          "bigquery.tables.updateData"
+        ],
+        "project": "${var.project_id}",
+        "role_id": "${replace(var.prefix, \"-\", \"_\")}_tables",
+        "stage": "GA",
+        "title": "Financial pilot tables"
+      }
+    },
+    "google_project_iam_member": {
+      "jobs": {
+        "member": "serviceAccount:${google_service_account.runner.email}",
+        "project": "${var.project_id}",
+        "role": "${google_project_iam_custom_role.jobs.name}"
+      }
+    },
+    "google_service_account": {
+      "runner": {
+        "account_id": "${var.prefix}-runner",
+        "display_name": "Synthetic financial batch runner",
+        "lifecycle": {
+          "prevent_destroy": true
+        },
+        "project": "${var.project_id}"
+      }
+    }
+  },
+  "variable": {
+    "prefix": {
+      "type": "string"
+    },
+    "project_id": {
+      "type": "string"
+    }
+  }
+}

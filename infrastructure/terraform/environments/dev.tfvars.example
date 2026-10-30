@@ -1,0 +1,7 @@
+# PLACEHOLDERS ONLY. Copy to an ignored local *.tfvars file after approval.
+project_id                  = "approved-sandbox-project"
+region                      = "europe-west2"
+environment                 = "dev"
+prefix                      = "fincrime-m5-dev"
+bucket_name                 = "replace-with-globally-unique-synthetic-bucket"
+provisioner_service_account = "foundation-provisioner@approved-sandbox-project.iam.gserviceaccount.com"

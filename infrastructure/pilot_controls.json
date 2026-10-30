@@ -1,0 +1,19 @@
+{
+  "alert_thresholds": [
+    0.5,
+    0.9,
+    1.0
+  ],
+  "budget_is_spending_cap": false,
+  "enforcement": "review_and_future_executor_required_not_terraform_enforced",
+  "max_jobs_per_approved_execution": 20,
+  "max_monthly_query_bytes": 10737418240,
+  "max_query_bytes_billed": 104857600,
+  "max_stored_bytes_all_versions": 104857600,
+  "max_total_upload_bytes": 10485760,
+  "max_transactions": 5000,
+  "pilot_hours": 24,
+  "proposed_monthly_budget_usd": 5,
+  "review_remaining_storage_after_days": 7,
+  "version": "1.0.0"
+}

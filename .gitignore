@@ -66,3 +66,12 @@ reports/*
 !reports/sample/model_monitoring_report.md
 !reports/sample/governance_evidence_pack.md
 !reports/sample/model_risk_management_report.md
+
+# Terraform local state, plans, provider cache and environment inputs
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
+*.tfvars.json
+crash.log

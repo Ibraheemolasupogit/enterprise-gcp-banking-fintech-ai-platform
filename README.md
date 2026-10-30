@@ -279,3 +279,7 @@ The versioned local raw → validated → curated workflow supports explainable 
 ### M4 local financial analytics
 
 Four versioned SQLite daily marts cover observed transaction, customer, account and operational activity with currency-specific reconciliation and source lineage. See [analytics contracts and SQL migration](docs/financial_analytics.md) and [executed evidence](docs/upgrade/m4_validation.md). BigQuery schemas and SQL are proposed and have not been cloud-tested.
+
+### M5 GCP deployment readiness
+
+Reviewable modular Terraform proposes one regional versioned Storage bucket, one BigQuery dataset/seven tables and scoped runtime IAM. [Design and limitations](docs/gcp_deployment_readiness.md), [approval gates](docs/gcp_pilot_plan.md), and [validation evidence](docs/upgrade/m5_validation.md) distinguish offline checks from outstanding provider/cloud verification. No GCP deployment has occurred.
