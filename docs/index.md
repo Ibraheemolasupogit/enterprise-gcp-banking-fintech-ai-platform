@@ -2,6 +2,11 @@
 
 Use this index to navigate the project documentation.
 
+## Upgrade M2
+
+- [Versioned synthetic data and temporal contracts](synthetic_v2_contract.md)
+- [Executed M2 validation](upgrade/m2_validation.md)
+
 ## Upgrade M1
 
 - [Inherited baseline, hashes and donor provenance](upgrade/baseline.md)

@@ -2,6 +2,25 @@
 
 A local-first, GCP-aligned machine learning intelligence platform for synthetic financial crime analytics, covering fraud detection, AML risk scoring, anomaly detection, graph risk, NLP alert triage, monitoring, governance evidence, and cloud architecture design.
 
+## Upgrade M2: Synthetic Data Integrity
+
+The separate v2 generator enforces UTC entity/event chronology, ownership and
+foreign keys, account currency and exact integer minor-unit amounts. It emits
+observable behavioural scenarios and separate synthetic outcomes, plus an M1
+evaluation export. Historical samples and legacy commands remain unchanged.
+
+```bash
+python3 -m financial_crime_ml.cli generate-data-v2 --run-id m2-data-1
+python3 -m financial_crime_ml.cli validate-data-v2 --dataset-dir outputs/runs/m2-data-1
+python3 -m financial_crime_ml.cli evaluate-fraud \
+  --input outputs/runs/m2-data-1/evaluation_transactions.csv --run-id m2-fraud-1
+```
+
+Outputs go to fresh ignored `outputs/runs/` folders; run IDs cannot be reused.
+See the [v2 data contract](docs/synthetic_v2_contract.md) for configuration, money,
+timestamp rules, outcome separation and limitations, and
+[executed M2 validation](docs/upgrade/m2_validation.md) for actual results.
+
 ## Upgrade M1: Traceable Fraud Evaluation
 
 The original 12 milestones and committed sample artifacts are preserved. The

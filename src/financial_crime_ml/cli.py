@@ -29,6 +29,13 @@ def get_status_message() -> str:
 def main(argv: list[str] | None = None) -> None:
     """Run a simple project command."""
     args = list(sys.argv[1:] if argv is None else argv)
+    if args and args[0] in {"generate-data-v2", "validate-data-v2"}:
+        from financial_crime_ml.data_generation.v2.workflow import generation_main, validation_main
+
+        command = generation_main if args[0] == "generate-data-v2" else validation_main
+        command(args[1:])
+        return
+
     if args and args[0] == "evaluate-fraud":
         from financial_crime_ml.evaluation.fraud_baseline import evaluation_main
 
