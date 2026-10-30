@@ -58,3 +58,6 @@ Use this index to navigate the project documentation.
 
 - [M3 financial data foundation](financial_data_foundation.md)
 - [M3 validation evidence](upgrade/m3_validation.md)
+
+- [M4 financial analytics contracts](financial_analytics.md)
+- [M4 validation evidence](upgrade/m4_validation.md)

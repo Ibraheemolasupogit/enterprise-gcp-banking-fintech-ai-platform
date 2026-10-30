@@ -275,3 +275,7 @@ This repository is not production deployment. It does not create cloud infrastru
 ### M3 local financial data foundation
 
 The versioned local raw → validated → curated workflow supports explainable quarantine, currency-specific reconciliation and immutable reruns. See the [contract and CLI](docs/financial_data_foundation.md) and [executed validation evidence](docs/upgrade/m3_validation.md). This is a local implementation; no GCP deployment is claimed.
+
+### M4 local financial analytics
+
+Four versioned SQLite daily marts cover observed transaction, customer, account and operational activity with currency-specific reconciliation and source lineage. See [analytics contracts and SQL migration](docs/financial_analytics.md) and [executed evidence](docs/upgrade/m4_validation.md). BigQuery schemas and SQL are proposed and have not been cloud-tested.
