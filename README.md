@@ -271,3 +271,7 @@ This repository is not production deployment. It does not create cloud infrastru
 - Investigator feedback loop design
 - Model registry and approval workflow integration
 - Expanded fairness, explainability, and typology evaluation documentation
+
+### M3 local financial data foundation
+
+The versioned local raw → validated → curated workflow supports explainable quarantine, currency-specific reconciliation and immutable reruns. See the [contract and CLI](docs/financial_data_foundation.md) and [executed validation evidence](docs/upgrade/m3_validation.md). This is a local implementation; no GCP deployment is claimed.

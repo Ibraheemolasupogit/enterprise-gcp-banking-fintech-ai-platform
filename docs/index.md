@@ -55,3 +55,6 @@ Use this index to navigate the project documentation.
 - [Sample outputs guide](sample_outputs_guide.md)
 - [Repository quality checklist](repository_quality_checklist.md)
 - [Portfolio positioning](portfolio_positioning.md)
+
+- [M3 financial data foundation](financial_data_foundation.md)
+- [M3 validation evidence](upgrade/m3_validation.md)

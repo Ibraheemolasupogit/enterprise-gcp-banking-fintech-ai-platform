@@ -29,6 +29,12 @@ def get_status_message() -> str:
 def main(argv: list[str] | None = None) -> None:
     """Run a simple project command."""
     args = list(sys.argv[1:] if argv is None else argv)
+    if args and args[0] == "ingest-financial-data":
+        from financial_crime_ml.ingestion.foundation.cli import ingestion_main
+
+        ingestion_main(args[1:])
+        return
+
     if args and args[0] in {"generate-data-v2", "validate-data-v2"}:
         from financial_crime_ml.data_generation.v2.workflow import generation_main, validation_main
 
