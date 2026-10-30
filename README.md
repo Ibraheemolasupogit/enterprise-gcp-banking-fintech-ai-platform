@@ -283,3 +283,5 @@ Four versioned SQLite daily marts cover observed transaction, customer, account 
 ### M5 GCP deployment readiness
 
 Reviewable modular Terraform proposes one regional versioned Storage bucket, one BigQuery dataset/seven tables and scoped runtime IAM. [Design and limitations](docs/gcp_deployment_readiness.md), [approval gates](docs/gcp_pilot_plan.md), and [validation evidence](docs/upgrade/m5_validation.md) distinguish offline checks from outstanding provider/cloud verification. No GCP deployment has occurred.
+
+M5 also provides separate provisioning/cleanup permission candidates and environment examples, plus an offline seven-table export comparator. Run `make gcp-offline-check` with existing tooling; it performs no downloads or cloud operations. Export comparison instructions and remaining migration gaps are in the readiness design. M1–M4 interfaces and the 43 historical sample artifacts remain preserved.

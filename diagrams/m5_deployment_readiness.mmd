@@ -4,6 +4,8 @@ flowchart LR
     M3 -. Approved upload only .-> GCS[Proposed regional versioned Storage bucket]
     GCS -. Approved typed batch loads .-> BQ[Proposed BigQuery curated transactions and two dimensions]
     BQ -. Approved transactional DML .-> Marts[Proposed four BigQuery daily marts]
-    Marts -. Logical reconciliation and evidence .-> M4
+    M4 --> Compare[Implemented offline seven-table CSV reconciliation]
+    BQ -. Separately approved complete table reads .-> Compare
+    Marts -. Separately approved complete table reads .-> Compare
     TF[Offline checked Terraform pending provider validation] -. Separate approved plan and apply .-> GCS
     TF -. Separate approved plan and apply .-> BQ

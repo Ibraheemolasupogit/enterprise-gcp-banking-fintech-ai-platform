@@ -1,5 +1,5 @@
 terraform {
-  required_version = ">= 1.6, < 2.0"
+  required_version = ">= 1.9, < 2.0"
   required_providers {
     google = {
       source  = "hashicorp/google"
@@ -16,6 +16,7 @@ provider "google" {
 }
 
 locals {
+  identity_prefix = "${var.prefix}-${var.environment}"
   labels = {
     environment = var.environment
     application = "financial-data-foundation"
@@ -32,7 +33,7 @@ locals {
 module "identity" {
   source     = "./modules/identity"
   project_id = var.project_id
-  prefix     = var.prefix
+  prefix     = local.identity_prefix
 }
 
 module "storage" {
@@ -66,6 +67,8 @@ output "inventory" {
     runner          = module.identity.runner_email
     provisioner     = var.provisioner_service_account
     region          = var.region
+    environment     = var.environment
+    identity_prefix = local.identity_prefix
     deployment_note = "IaC only; no workloads, API activation or budget resources managed"
   }
 }

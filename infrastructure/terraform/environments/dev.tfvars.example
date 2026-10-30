@@ -2,6 +2,6 @@
 project_id                  = "approved-sandbox-project"
 region                      = "europe-west2"
 environment                 = "dev"
-prefix                      = "fincrime-m5-dev"
+prefix                      = "fincrime-m5"
 bucket_name                 = "replace-with-globally-unique-synthetic-bucket"
 provisioner_service_account = "foundation-provisioner@approved-sandbox-project.iam.gserviceaccount.com"

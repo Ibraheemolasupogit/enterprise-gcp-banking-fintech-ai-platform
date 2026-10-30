@@ -1,0 +1,7 @@
+# PLACEHOLDERS ONLY. Separate state and fresh resources required for each environment.
+project_id                  = "approved-sandbox-project"
+region                      = "europe-west2"
+environment                 = "test"
+prefix                      = "fincrime-m5"
+bucket_name                 = "replace-with-globally-unique-synthetic-test-bucket"
+provisioner_service_account = "foundation-provisioner@approved-sandbox-project.iam.gserviceaccount.com"

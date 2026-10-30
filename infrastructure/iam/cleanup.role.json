@@ -1,0 +1,13 @@
+{
+  "title": "Financial pilot cleanup add-on candidate",
+  "description": "Review-only deletion add-on to provisioning access. Separate named-resource cleanup approval required; never grant to runtime.",
+  "stage": "GA",
+  "includedPermissions": [
+    "iam.roles.delete",
+    "iam.serviceAccounts.delete",
+    "storage.buckets.delete",
+    "storage.objects.delete",
+    "bigquery.datasets.delete",
+    "bigquery.tables.delete"
+  ]
+}

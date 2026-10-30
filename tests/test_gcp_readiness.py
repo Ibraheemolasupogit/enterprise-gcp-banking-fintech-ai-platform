@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from financial_crime_ml.analytics.contracts import COLUMNS, GRAINS, bigquery_schemas
+from financial_crime_ml.data_generation.v2.contracts import MAX_AMOUNT_MINOR
 from financial_crime_ml.ingestion.foundation.contracts import (
     CURATED_FIELDS,
     ENTITY_SCHEMAS,
@@ -32,6 +33,7 @@ def test_iac_inventory_is_bounded_to_approved_services():
         assert set(module(name)["resource"]) == types
     main = (INFRA / "terraform/main.tf").read_text()
     assert 'version = "~> 7.31.0"' in main
+    assert 'required_version = ">= 1.9, < 2.0"' in main  # Cross-variable input validation.
     assert "impersonate_service_account = var.provisioner_service_account" in main
     assert 'source     = "./modules/identity"' in main
     assert "google_project_service" not in main
@@ -142,4 +144,67 @@ def test_bounded_pilot_controls_do_not_claim_hard_caps():
     assert controls["budget_is_spending_cap"] is False
     assert "not_terraform_enforced" in controls["enforcement"]
     # Worst-case per-currency sum remains exact and within signed INT64.
-    assert controls["max_transactions"] * 1_000_000_000 < 2**63 - 1
+    assert controls["max_transactions"] * MAX_AMOUNT_MINOR < 2**63 - 1
+
+
+def test_provisioner_and_cleanup_candidates_separate_data_and_delete_access():
+    provisioner = json.loads((INFRA / "iam/provisioner.role.json").read_text())
+    cleanup = json.loads((INFRA / "iam/cleanup.role.json").read_text())
+    permissions = set(provisioner["includedPermissions"])
+    assert len(permissions) == len(provisioner["includedPermissions"])
+    assert "resourcemanager.projects.setIamPolicy" in permissions  # Explicit privileged bootstrap.
+    assert "bigquery.tables.create" in permissions
+    assert "storage.buckets.setIamPolicy" in permissions
+    for permission in permissions:
+        assert "*" not in permission
+        assert not permission.endswith((".delete", ".undelete", ".getData", ".updateData"))
+        assert not permission.startswith(("storage.objects.", "iam.serviceAccountKeys."))
+        assert permission not in {"bigquery.jobs.create", "serviceusage.services.enable",
+                                  "iam.serviceAccounts.getAccessToken"}
+    assert set(cleanup["includedPermissions"]) == {
+        "iam.roles.delete", "iam.serviceAccounts.delete", "storage.buckets.delete",
+        "storage.objects.delete", "bigquery.datasets.delete", "bigquery.tables.delete",
+    }
+    assert permissions.isdisjoint(cleanup["includedPermissions"])
+
+
+def test_root_hcl_parses_and_environment_names_are_isolated():
+    # Use an installed parser only. It is optional; never install tooling from a test.
+    hcl2 = pytest.importorskip("hcl2", reason="Optional offline HCL parser unavailable")
+    root = INFRA / "terraform"
+    for path in [*root.glob("*.tf"), *root.glob("environments/*.example")]:
+        with path.open() as handle:
+            assert hcl2.load(handle)
+    text = (root / "main.tf").read_text()
+    assert 'identity_prefix = "${var.prefix}-${var.environment}"' in text
+    assert "prefix     = local.identity_prefix" in text
+    assert 'dataset_id    = "${replace(var.prefix, "-", "_")}_${var.environment}"' in text
+    variables = (root / "variables.tf").read_text()
+    assert 'endswith(var.provisioner_service_account, "@${var.project_id}' in variables
+    assert "${var.prefix}-${var.environment}-runner@" in variables
+    assert "{4,17}" in variables  # 18 base + 5 environment + 7 runner = 30 SA chars.
+    for environment in ("dev", "test"):
+        example = (root / f"environments/{environment}.tfvars.example").read_text()
+        assert f'environment                 = "{environment}"' in example
+
+
+def test_root_wiring_and_inventory_count():
+    # Count for_each expansions rather than mistaking resource blocks for instances.
+    schemas = json.loads((INFRA / "schemas/v1/source_tables.json").read_text())
+    schemas.update({k: v["fields"] for k, v in bigquery_schemas()["tables"].items()})
+    count = 0
+    for name in ("identity", "storage", "bigquery"):
+        for instances in module(name)["resource"].values():
+            for resource in instances.values():
+                if "for_each" in resource:
+                    assert resource["for_each"] == "${var.schemas}"
+                    count += len(schemas)
+                else:
+                    count += 1
+    assert count == 25
+    main = (INFRA / "terraform/main.tf").read_text()
+    for resource in ("project_id", "region", "labels"):
+        assert resource in main
+    # All modules must receive required inputs; child modules cannot silently default identity.
+    for name in ("storage", "bigquery"):
+        assert all("default" not in spec for spec in module(name)["variable"].values())

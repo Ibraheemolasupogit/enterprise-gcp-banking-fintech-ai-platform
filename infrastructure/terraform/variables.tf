@@ -29,10 +29,10 @@ variable "environment" {
 variable "prefix" {
   type        = string
   default     = "fincrime-m5"
-  description = "Unique per environment/project; identities and custom roles use this prefix."
+  description = "Base namespace; environment is appended to identities, roles and dataset."
   validation {
-    condition     = can(regex("^[a-z][a-z0-9-]{4,19}$", var.prefix))
-    error_message = "Prefix must have 5-20 lowercase letters, digits or hyphens."
+    condition     = can(regex("^[a-z][a-z0-9-]{4,17}$", var.prefix))
+    error_message = "Prefix must have 5-18 characters, leaving room for environment and runner."
   }
 }
 
@@ -52,7 +52,7 @@ variable "provisioner_service_account" {
     condition = can(regex(
       "^[a-z][a-z0-9-]+@[a-z][a-z0-9-]+\\.iam\\.gserviceaccount\\.com$",
       var.provisioner_service_account
-    )) && var.provisioner_service_account != "${var.prefix}-runner@${var.project_id}.iam.gserviceaccount.com"
-    error_message = "Supply a dedicated provisioner service account distinct from the runner."
+    )) && endswith(var.provisioner_service_account, "@${var.project_id}.iam.gserviceaccount.com") && var.provisioner_service_account != "${var.prefix}-${var.environment}-runner@${var.project_id}.iam.gserviceaccount.com"
+    error_message = "Supply a same-project provisioner service account distinct from the runner."
   }
 }
