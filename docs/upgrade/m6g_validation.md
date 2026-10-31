@@ -1,0 +1,45 @@
+# M6G Console-verified project and billing safeguards
+
+Recorded 2026-10-31 at revision `0d29ed6`. **Source: the user's Google Cloud Console verification in the M6G instruction**, not an assistant Console session, screenshot inspection or fresh API response. Earlier M6E 403/parent uncertainty is historical and is superseded for the specific facts supplied below. No M6F execution or unsupplied action is inferred.
+
+## Recorded facts and remaining uncertainty
+
+| Item | Evidence status |
+| --- | --- |
+| Dedicated project | **`ebank-pilot-dev-261031-k7m4`**, number **`203569506404`** — user Console-verified |
+| Parent | **No organization** — user Console-verified |
+| Billing | **Linked existing GBP billing account** — user Console-verified; no account identifier/payment details copied into Git |
+| Project monthly alert budget | **`Enterprise Banking AI Pilot - Dev`**, **£5**, **50%, 80%, 100%** thresholds — user Console-verified |
+| Existing portfolio budget | **Unchanged** — user Console-verified; no pilot change should target it |
+| Workload region | **`europe-west2` intended**; regional resources/availability/allocation not verified by this report |
+
+Project lifecycle status, actual creator/direct IAM/deny/PAB/default grants, APIs, dedicated identities, bucket/dataset conflicts, quotas and deployed workload inventory remain unverified in the **new** project. The Console-reported No-organization parent has no organization/folder ancestors; it does not prove direct IAM or platform defaults are safe. Old-project IAM/API/quota observations must not be transferred to this project.
+
+Budget spend basis (actual/forecast), any extra rules, credit treatment, notification recipients/delivery and the internal API filter/export have not been supplied or independently inspected. The reported project-specific scope is accepted as Console evidence; any later API verification should check filter `projects/203569506404`. A budget existing in Console does not establish that the earlier automated Budget API consumer route now works. Do not enable that API merely to repeat already-completed budget setup.
+
+**£5 is the user's confirmed GBP budget, not a converted US$5 proposal.** Existing `infrastructure/pilot_controls.json` still contains USD5, 50/90/100% and a forecast proposal. Record this local-document/configuration mismatch without modifying the file or billing. Later configuration alignment needs scoped approval. The US$1 manual workload allowance remains separate and needs explicit currency/cost-envelope agreement. **Budget alerts do not enforce a hard spending cap** or automatically stop workloads; the £5 budget is not execution authorization.
+
+## Minimum next IAM/API/bootstrap work — pending approval
+
+1. **Bounded new-project pre-bootstrap verification:** obtain separately approved reads or explicit Console evidence for effective IAM/default grants, existing service accounts/custom roles, API states, fresh resource names, relevant quotas and budget notification settings. Project creation/billing-link/budget-creation checks are no longer blockers to recording the supplied facts. Classify and bound priced metadata reads before executing any. No cloud read ran in M6G.
+2. **APIs:** baseline is `bigquery.googleapis.com`, `storage.googleapis.com`, `iam.googleapis.com`, `iamcredentials.googleapis.com`, `cloudresourcemanager.googleapis.com`, `serviceusage.googleapis.com`. Approve enabling **only verified missing entries** on project `203569506404`; do not copy old-project disabled/enabled states. Temporary activator permissions are `serviceusage.services.enable/get/list` and `serviceusage.operations.get`, with any supported service-side requirement reviewed separately. No disable or quota-update permissions by default. Cloud Billing/Budget API changes are optional administration work requiring a justified consumer route and separate approval, not mandatory budget recreation.
+3. **Dedicated provisioner if absent:** proposed `bankpilot-dev-provisioner@ebank-pilot-dev-261031-k7m4.iam.gserviceaccount.com`. Require an explicit named operator, expiry/revocation owner and exact role/binding inventory. M6D proposes project custom role `bankpilot_dev_provision`: the existing 29-permission candidate **minus** `iam.roles.list`, `iam.serviceAccounts.list`, `storage.buckets.list`, `bigquery.tables.list` (25 proposed permissions). Confirm sufficiency before use; no actual role definition has changed. IAM writes/custom-role management remain escalation-capable, so grant only on this dedicated project for an approved window; no Owner/Editor/admin, billing, API-enable, data/job/delete or key rights for the provisioner.
+4. **Keyless operator access:** proposed `bankpilot_dev_impersonate` contains only `iam.serviceAccounts.getAccessToken`, bound to the approved operator **on the named provisioner account only**. No project-wide token minting, signing/key creation, implicit authentication/ADC setup or auto-widening. Security bootstrap needs narrowly reviewed account create/get/getIamPolicy/setIamPolicy, custom-role create/get and project get/getIamPolicy/setIamPolicy permissions; update rights only for approved revisions. Creating the provisioner, two bootstrap custom roles and two scoped bindings is separate from the 25-instance pilot root and is not approved here.
+5. **Runtime remains separate:** `bankpilot-dev-runner@ebank-pilot-dev-261031-k7m4.iam.gserviceaccount.com` is proposed for future Terraform apply, not bootstrap now. Preserve five scoped runtime roles: project job-create/service-use, dataset metadata read, bucket metadata/object create/get/list, three input-table read grants and four mart read/data-update grants. No administration, billing, schema creation, API activation, keys, impersonation or object deletion. Runtime impersonation and temporary initial-load grants require separate later approval.
+
+## Secure state and planning checklist
+
+- **Pending state decision:** proposed `infrastructure/terraform/state/dev/terraform.tfstate`; approve the sole custodian, verified local encryption, encrypted backup destination/retention, recovery method and exclusive execution. Use umask 077, directory 0700/file 0600 and state locking. Keep state/backups/plan/JSON/tfvars private and ignored; no remote bucket is required by this proposal.
+- **Configuration is not prepared:** current root still has implicit local state and placeholder examples. The proposed path needs a later approved explicit local backend and ignored per-environment backend inputs; do not silently use the root default or migrate unrelated state. Do not create backend/input files or run init in M6G.
+- **Remaining exact inputs:** confirm `environment=dev`, `prefix=bankpilot`, fresh bucket `ebank-pilot-dev-261031-k7m4-ew2-artifacts`, dataset `bankpilot_dev`, provisioner/operator and source-authentication route. These are prior proposals, not Console-confirmed deployments. A gcloud session does not authorize ADC creation or prove Terraform authentication readiness.
+- **Future plan only after prerequisites:** separate approval for concrete tfvars/backend/authentication, Google 7.31.0 lockfile and saved-plan generation. Expect the existing **25 Terraform creates**, seven tables, no imports/replacements/deletes, project/billing/budget management or extra services. Project/budget already exist outside the root. Apply still requires approval of that specific saved-plan SHA256/IAM diff/cost window; workloads and cleanup remain separate.
+
+The [approval checklist](../gcp_pilot_plan.md) now marks the supplied Console prerequisites complete and removes obsolete repeat-creation/provider-download gates. It retains the £5 budget, portfolio-budget protection and all infrastructure/workload/cleanup safeguards.
+
+**Next precise gate:** approve a bounded new-project pre-bootstrap verification package, or supply equivalent Console API/IAM/inventory evidence; confirm the operator/expiry and state custody. Then approve the exact missing API activations and named provisioner/custom-role/binding bootstrap. No blanket IAM/API activation, budget modification, authentication, planning or apply authorization follows from M6G.
+
+## Offline validation and stop status
+
+Only documentation changed. **12 HCL/schema/IAM policy tests passed in 0.56s; recursive Terraform formatting passed; all 43 sample hashes and the infrastructure/lockfile are unchanged.** Source/value and budget-drift consistency, local Markdown links/whitespace and `git diff --check` also passed. Results are recorded in ignored `outputs/runs/m6g-evidence/verification.json`; no fresh full-suite run is needed for this documentation-only change.
+
+This milestone makes no cloud deployment claim beyond the user's specific Console facts. No cloud API call, authentication/ADC change, IAM identity/grant, API enablement, billing change, state/input creation, plan/apply/destroy, workload, installation, commit or push occurred. The existing untracked M6E document is preserved. **Stop after M6G.**
