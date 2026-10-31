@@ -47,7 +47,7 @@ variable "bucket_name" {
 
 variable "provisioner_service_account" {
   type        = string
-  description = "Pre-existing dedicated provisioner identity; no service-account key files."
+  description = "Provisioner created by the separate bootstrap root (ADR-003); impersonated keylessly, no key files."
   validation {
     condition = can(regex(
       "^[a-z][a-z0-9-]+@[a-z][a-z0-9-]+\\.iam\\.gserviceaccount\\.com$",

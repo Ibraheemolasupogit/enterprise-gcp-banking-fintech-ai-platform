@@ -28,7 +28,7 @@ certify model validity, enforce investigator approval, or add production control
 | M2 synthetic contracts | Exact currency minor units, constrained UTC events, deterministic generation and validation | Synthetic inputs only; no cloud generator |
 | M3 financial foundation | Traceable raw/validated/curated snapshots, quarantine and reconciliation | Explicit target schemas for curated transactions/customers/accounts; no cloud ingestion connector |
 | M4 analytics | Four SQLite daily marts, independent grain/metric checks, currency totals and lineage | M4 GoogleSQL CTAS mapping preserved as an untested proposal |
-| M5 infrastructure | Modular Terraform, JSON/HCL parsing and resource/IAM/schema policy checks; environment-isolated names; reviewable provisioning/cleanup candidates | 25 proposed resource instances; provider-backed validation, lock file and plan outstanding; no resources deployed |
+| M5 infrastructure | Modular Terraform, JSON/HCL parsing and resource/IAM/schema policy checks; environment-isolated names; reviewable provisioning/cleanup candidates | M6K: 18 pilot instances plus a separate IAM bootstrap root (11–13 instances); both roots provider-validated offline; no plan; no resources deployed |
 | M5 migration verification | Offline comparison of seven complete CSV exports to verified M3/M4 runs, exact typed fields/keys/grains/currency totals | Does not authenticate export provenance or establish BigQuery SQL execution; no cloud export/acquisition tool |
 | M5 operations/cost | Explicit prerequisite/plan/apply/workload/cleanup approval gates; bounded control proposals and cost arithmetic | No cloud executor, budget, API enablement, paid service call or hard spending cap implemented |
 

@@ -1,25 +1,31 @@
 {
   "alert_thresholds": [
     0.5,
-    0.9,
+    0.8,
     1.0
   ],
+  "budget_currency": "GBP",
   "budget_is_spending_cap": false,
-  "budget_currency": "USD",
+  "budget_name": "Enterprise Banking AI Pilot - Dev",
   "budget_scope": "approved_project_only",
+  "budget_verification_source": "user_console_M6G",
   "enforcement": "review_and_future_executor_required_not_terraform_enforced",
-  "max_jobs_per_approved_execution": 20,
+  "forecast_alert_status": "unverified",
+  "forecast_alert_thresholds": null,
+  "independent_budget_verification": "blocked_billing_budgets_api_disabled_M6H",
   "job_counting": "include_dry_run_requests_and_parent_child_jobs",
+  "max_jobs_per_approved_execution": 20,
   "max_monthly_query_bytes": 10737418240,
   "max_query_bytes_billed": 104857600,
   "max_stored_bytes_all_versions": 104857600,
   "max_total_upload_bytes": 10485760,
   "max_transactions": 5000,
-  "pilot_hours": 24,
+  "monthly_alert_budget_amount": 5,
+  "pilot_allowance_status": "separate_manual_workload_proposal_not_a_conversion_of_the_GBP_budget",
   "pilot_allowance_usd": 1,
-  "forecast_alert_thresholds": [1.0],
+  "pilot_hours": 24,
   "pricing_status": "illustrative_assumptions_manual_london_repricing_required",
-  "proposed_monthly_budget_usd": 5,
   "review_remaining_storage_after_days": 7,
-  "version": "1.0.0"
+  "spending_cap_note": "Budget alerts notify only; they do not stop jobs or cap spending.",
+  "version": "1.1.0"
 }

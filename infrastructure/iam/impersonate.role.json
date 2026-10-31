@@ -1,0 +1,8 @@
+{
+  "title": "Financial pilot provisioner impersonation",
+  "description": "Short-lived token minting only. Bind on the provisioner service account resource to one named operator with an expiring condition; never at project scope.",
+  "stage": "GA",
+  "includedPermissions": [
+    "iam.serviceAccounts.getAccessToken"
+  ]
+}

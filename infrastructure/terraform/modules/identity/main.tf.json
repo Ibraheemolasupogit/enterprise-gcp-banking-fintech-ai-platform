@@ -1,107 +1,90 @@
 {
-  "output": {
-    "metadata_role": {
-      "value": "${google_project_iam_custom_role.metadata.name}"
-    },
-    "object_role": {
-      "value": "${google_project_iam_custom_role.objects.name}"
-    },
-    "reader_role": {
-      "value": "${google_project_iam_custom_role.readers.name}"
-    },
-    "runner_email": {
-      "value": "${google_service_account.runner.email}"
-    },
-    "table_role": {
-      "value": "${google_project_iam_custom_role.tables.name}"
-    }
-  },
-  "resource": {
-    "google_project_iam_custom_role": {
-      "jobs": {
-        "lifecycle": {
-          "prevent_destroy": true
-        },
-        "permissions": [
-          "bigquery.jobs.create",
-          "serviceusage.services.use"
-        ],
-        "project": "${var.project_id}",
-        "role_id": "${replace(var.prefix, \"-\", \"_\")}_jobs",
-        "stage": "GA",
-        "title": "Financial pilot jobs"
-      },
-      "metadata": {
-        "lifecycle": {
-          "prevent_destroy": true
-        },
-        "permissions": [
-          "bigquery.datasets.get"
-        ],
-        "project": "${var.project_id}",
-        "role_id": "${replace(var.prefix, \"-\", \"_\")}_metadata",
-        "stage": "GA",
-        "title": "Financial pilot metadata"
-      },
-      "objects": {
-        "lifecycle": {
-          "prevent_destroy": true
-        },
-        "permissions": [
-          "storage.buckets.get",
-          "storage.objects.create",
-          "storage.objects.get",
-          "storage.objects.list"
-        ],
-        "project": "${var.project_id}",
-        "role_id": "${replace(var.prefix, \"-\", \"_\")}_objects",
-        "stage": "GA",
-        "title": "Financial pilot objects"
-      },
-      "readers": {
-        "lifecycle": {
-          "prevent_destroy": true
-        },
-        "permissions": [
-          "bigquery.tables.get",
-          "bigquery.tables.getData"
-        ],
-        "project": "${var.project_id}",
-        "role_id": "${replace(var.prefix, \"-\", \"_\")}_readers",
-        "stage": "GA",
-        "title": "Financial pilot input readers"
-      },
-      "tables": {
-        "lifecycle": {
-          "prevent_destroy": true
-        },
-        "permissions": [
-          "bigquery.tables.get",
-          "bigquery.tables.getData",
-          "bigquery.tables.updateData"
-        ],
-        "project": "${var.project_id}",
-        "role_id": "${replace(var.prefix, \"-\", \"_\")}_tables",
-        "stage": "GA",
-        "title": "Financial pilot tables"
-      }
-    },
-    "google_project_iam_member": {
-      "jobs": {
-        "member": "serviceAccount:${google_service_account.runner.email}",
-        "project": "${var.project_id}",
-        "role": "${google_project_iam_custom_role.jobs.name}"
-      }
-    },
+  "data": {
     "google_service_account": {
       "runner": {
+        "project": "${var.project_id}",
         "account_id": "${var.prefix}-runner",
-        "display_name": "Synthetic financial batch runner",
         "lifecycle": {
-          "prevent_destroy": true
-        },
-        "project": "${var.project_id}"
+          "postcondition": [
+            {
+              "condition": "${!self.disabled}",
+              "error_message": "Bootstrapped runtime service account must exist and be enabled."
+            }
+          ]
+        }
       }
+    },
+    "google_project_iam_custom_role": {
+      "runtime": {
+        "for_each": "${var.runtime_roles}",
+        "project": "${var.project_id}",
+        "role_id": "${replace(var.prefix, \"-\", \"_\")}_${each.key}",
+        "lifecycle": {
+          "postcondition": [
+            {
+              "condition": "${!self.deleted && self.stage == \"GA\" && toset(self.permissions) == toset(each.value.permissions)}",
+              "error_message": "Bootstrapped runtime custom role is missing, deleted or differs from infrastructure/iam/runtime_roles.json."
+            }
+          ]
+        }
+      },
+      "provision": {
+        "project": "${var.project_id}",
+        "role_id": "${replace(var.prefix, \"-\", \"_\")}_provision",
+        "lifecycle": {
+          "postcondition": [
+            {
+              "condition": "${!self.deleted && toset(self.permissions) == toset(var.provisioner_permissions)}",
+              "error_message": "Provisioner custom role is missing, deleted or differs from infrastructure/iam/provisioner.role.json."
+            }
+          ]
+        }
+      }
+    },
+    "google_project_iam_policy": {
+      "project": {
+        "project": "${var.project_id}",
+        "lifecycle": {
+          "postcondition": [
+            {
+              "condition": "${anytrue([for b in try(jsondecode(self.policy_data).bindings, []) : b.role == format(\"projects/%s/roles/%s\", var.project_id, data.google_project_iam_custom_role.runtime[\"jobs\"].role_id) && contains(try(b.members, []), \"serviceAccount:${data.google_service_account.runner.email}\") && try(b.condition, null) == null])}",
+              "error_message": "Bootstrap must grant the runner the jobs custom role at project scope, unconditionally."
+            },
+            {
+              "condition": "${alltrue([for b in try(jsondecode(self.policy_data).bindings, []) : b.role == format(\"projects/%s/roles/%s\", var.project_id, data.google_project_iam_custom_role.runtime[\"jobs\"].role_id) || !contains(try(b.members, []), \"serviceAccount:${data.google_service_account.runner.email}\")])}",
+              "error_message": "Runner holds an unexpected project-level role; only the jobs custom role is permitted."
+            },
+            {
+              "condition": "${alltrue([for b in try(jsondecode(self.policy_data).bindings, []) : b.role == format(\"projects/%s/roles/%s\", var.project_id, data.google_project_iam_custom_role.provision.role_id) || !contains(try(b.members, []), var.provisioner_member)])}",
+              "error_message": "Provisioner holds a project role other than its bootstrapped provision role (possible administrative escalation)."
+            },
+            {
+              "condition": "${alltrue([for b in try(jsondecode(self.policy_data).bindings, []) : b.role != format(\"projects/%s/roles/%s\", var.project_id, data.google_project_iam_custom_role.provision.role_id) || try(b.condition.expression, \"\") != \"\"])}",
+              "error_message": "Provisioner project binding must carry an expiring IAM condition."
+            }
+          ]
+        }
+      }
+    }
+  },
+  "output": {
+    "runner_email": {
+      "value": "${data.google_service_account.runner.email}"
+    },
+    "object_role": {
+      "value": "${format(\"projects/%s/roles/%s\", var.project_id, data.google_project_iam_custom_role.runtime[\"objects\"].role_id)}"
+    },
+    "reader_role": {
+      "value": "${format(\"projects/%s/roles/%s\", var.project_id, data.google_project_iam_custom_role.runtime[\"readers\"].role_id)}"
+    },
+    "table_role": {
+      "value": "${format(\"projects/%s/roles/%s\", var.project_id, data.google_project_iam_custom_role.runtime[\"tables\"].role_id)}"
+    },
+    "metadata_role": {
+      "value": "${format(\"projects/%s/roles/%s\", var.project_id, data.google_project_iam_custom_role.runtime[\"metadata\"].role_id)}"
+    },
+    "jobs_role": {
+      "value": "${format(\"projects/%s/roles/%s\", var.project_id, data.google_project_iam_custom_role.runtime[\"jobs\"].role_id)}"
     }
   },
   "variable": {
@@ -110,6 +93,18 @@
     },
     "project_id": {
       "type": "string"
+    },
+    "runtime_roles": {
+      "type": "map(object({ title = string, permissions = list(string) }))",
+      "description": "Expected bootstrapped runtime role definitions; verified, never created here."
+    },
+    "provisioner_permissions": {
+      "type": "list(string)",
+      "description": "Expected provisioner custom-role permissions; verified, never created here."
+    },
+    "provisioner_member": {
+      "type": "string",
+      "description": "serviceAccount: member of the impersonated provisioner."
     }
   }
 }

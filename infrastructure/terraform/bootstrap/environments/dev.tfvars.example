@@ -1,0 +1,8 @@
+# PLACEHOLDERS ONLY. Copy to an ignored local *.tfvars file after explicit bootstrap approval.
+project_id                  = "approved-sandbox-project"
+environment                 = "dev"
+prefix                      = "bankpilot"
+operator_member             = "user:approved-operator@example.com"
+provisioner_access_enabled  = false
+access_expiry               = null
+token_audit_logging_enabled = true

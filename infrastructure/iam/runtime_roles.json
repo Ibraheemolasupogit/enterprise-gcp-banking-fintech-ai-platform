@@ -1,0 +1,39 @@
+{
+  "jobs": {
+    "title": "Financial pilot jobs",
+    "permissions": [
+      "bigquery.jobs.create",
+      "serviceusage.services.use"
+    ]
+  },
+  "metadata": {
+    "title": "Financial pilot metadata",
+    "permissions": [
+      "bigquery.datasets.get"
+    ]
+  },
+  "objects": {
+    "title": "Financial pilot objects",
+    "permissions": [
+      "storage.buckets.get",
+      "storage.objects.create",
+      "storage.objects.get",
+      "storage.objects.list"
+    ]
+  },
+  "readers": {
+    "title": "Financial pilot input readers",
+    "permissions": [
+      "bigquery.tables.get",
+      "bigquery.tables.getData"
+    ]
+  },
+  "tables": {
+    "title": "Financial pilot tables",
+    "permissions": [
+      "bigquery.tables.get",
+      "bigquery.tables.getData",
+      "bigquery.tables.updateData"
+    ]
+  }
+}

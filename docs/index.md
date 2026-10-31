@@ -63,7 +63,9 @@ Use this index to navigate the project documentation.
 - [M4 validation evidence](upgrade/m4_validation.md)
 
 - [M5 GCP readiness](gcp_deployment_readiness.md)
-- [M5 provisioner permissions candidate](../infrastructure/iam/provisioner.role.json) and [separate cleanup add-on](../infrastructure/iam/cleanup.role.json)
+- [M6K provisioner role](../infrastructure/iam/provisioner.role.json), [runtime roles](../infrastructure/iam/runtime_roles.json), [impersonation role](../infrastructure/iam/impersonate.role.json) and [separate cleanup add-on](../infrastructure/iam/cleanup.role.json)
 - [M5 operational approval gates](gcp_pilot_plan.md)
 - [ADR-002 minimal GCP pilot](architecture_decisions/ADR-002-minimal-gcp-pilot.md)
+- [ADR-003 separated IAM bootstrap](architecture_decisions/ADR-003-separated-iam-bootstrap.md)
+- [M6J security review](upgrade/m6j_review.md) and [M6K remediation evidence](upgrade/m6k_validation.md)
 - [M5 validation](upgrade/m5_validation.md)

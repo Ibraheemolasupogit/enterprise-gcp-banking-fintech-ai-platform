@@ -9,3 +9,4 @@ flowchart LR
     Marts -. Separately approved complete table reads .-> Compare
     TF[Offline checked Terraform pending provider validation] -. Separate approved plan and apply .-> GCS
     TF -. Separate approved plan and apply .-> BQ
+    Boot[M6K separate IAM bootstrap root: runner, custom roles, project jobs member, expiring provisioner and impersonation grants] -. Separate approved administrator apply, own state .-> TF

@@ -1,6 +1,7 @@
 """Offline JSON IaC policy/schema checks, not a provider or cloud validation substitute."""
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -23,24 +24,27 @@ def module(name):
 
 def test_iac_inventory_is_bounded_to_approved_services():
     allowed = {
-        "identity": {"google_service_account", "google_project_iam_custom_role",
-                     "google_project_iam_member"},
         "storage": {"google_storage_bucket", "google_storage_bucket_iam_policy"},
         "bigquery": {"google_bigquery_dataset", "google_bigquery_table",
                      "google_bigquery_dataset_iam_policy", "google_bigquery_table_iam_member"},
     }
     for name, types in allowed.items():
         assert set(module(name)["resource"]) == types
+    # M6K: identity prerequisites are bootstrap-managed and only read/verified here.
+    identity = module("identity")
+    assert "resource" not in identity
+    assert set(identity["data"]) == {"google_service_account", "google_project_iam_custom_role",
+                                     "google_project_iam_policy"}
     main = (INFRA / "terraform/main.tf").read_text()
     assert 'version = "~> 7.31.0"' in main
     assert 'required_version = ">= 1.9, < 2.0"' in main  # Cross-variable input validation.
     assert "impersonate_service_account = var.provisioner_service_account" in main
-    assert 'source     = "./modules/identity"' in main
+    assert re.search(r'source\s+= "\./modules/identity"', main)
     assert "google_project_service" not in main
 
 
 def test_runner_permissions_are_explicit_and_do_not_administer_resources():
-    roles = module("identity")["resource"]["google_project_iam_custom_role"]
+    roles = json.loads((INFRA / "iam/runtime_roles.json").read_text())
     expected = {
         "jobs": {"bigquery.jobs.create", "serviceusage.services.use"},
         "objects": {"storage.buckets.get", "storage.objects.create",
@@ -52,9 +56,12 @@ def test_runner_permissions_are_explicit_and_do_not_administer_resources():
     assert set(roles) == set(expected)
     for name, values in expected.items():
         assert set(roles[name]["permissions"]) == values
-    project_bindings = module("identity")["resource"]["google_project_iam_member"]
-    assert set(project_bindings) == {"jobs"}
-    assert project_bindings["jobs"]["role"] == "${google_project_iam_custom_role.jobs.name}"
+    verified = module("identity")["data"]["google_project_iam_custom_role"]["runtime"]
+    assert verified["for_each"] == "${var.runtime_roles}"
+    assert "toset(each.value.permissions)" in json.dumps(verified["lifecycle"])
+    bootstrap = (INFRA / "terraform/bootstrap/main.tf").read_text()
+    assert 'resource "google_project_iam_member" "runner_jobs"' in bootstrap
+    assert 'role    = google_project_iam_custom_role.runtime["jobs"].name' in bootstrap
     for name in ("identity", "storage", "bigquery"):
         text = json.dumps(module(name))
         for forbidden in ("allUsers", "allAuthenticatedUsers", "roles/owner", "roles/editor",
@@ -142,6 +149,18 @@ def test_bounded_pilot_controls_do_not_claim_hard_caps():
     assert controls["max_query_bytes_billed"] <= 100 * 1024**2
     assert controls["max_jobs_per_approved_execution"] == 20
     assert controls["budget_is_spending_cap"] is False
+    assert "do not stop jobs or cap spending" in controls["spending_cap_note"]
+    # M6K: aligned with the user Console-verified M6G budget; no USD-named budget key remains.
+    assert controls["budget_currency"] == "GBP"
+    assert controls["monthly_alert_budget_amount"] == 5
+    assert controls["alert_thresholds"] == [0.5, 0.8, 1.0]
+    assert controls["budget_verification_source"] == "user_console_M6G"
+    assert controls["forecast_alert_thresholds"] is None
+    assert controls["forecast_alert_status"] == "unverified"
+    assert "proposed_monthly_budget_usd" not in controls
+    # Separate manual workload allowance is preserved and not a converted budget.
+    assert controls["pilot_allowance_usd"] == 1
+    assert "not_a_conversion" in controls["pilot_allowance_status"]
     assert "not_terraform_enforced" in controls["enforcement"]
     # Worst-case per-currency sum remains exact and within signed INT64.
     assert controls["max_transactions"] * MAX_AMOUNT_MINOR < 2**63 - 1
@@ -152,7 +171,8 @@ def test_provisioner_and_cleanup_candidates_separate_data_and_delete_access():
     cleanup = json.loads((INFRA / "iam/cleanup.role.json").read_text())
     permissions = set(provisioner["includedPermissions"])
     assert len(permissions) == len(provisioner["includedPermissions"])
-    assert "resourcemanager.projects.setIamPolicy" in permissions  # Explicit privileged bootstrap.
+    # M6K: project IAM writes and role administration moved to the bootstrap root.
+    assert "resourcemanager.projects.setIamPolicy" not in permissions
     assert "bigquery.tables.create" in permissions
     assert "storage.buckets.setIamPolicy" in permissions
     for permission in permissions:
@@ -162,8 +182,8 @@ def test_provisioner_and_cleanup_candidates_separate_data_and_delete_access():
         assert permission not in {"bigquery.jobs.create", "serviceusage.services.enable",
                                   "iam.serviceAccounts.getAccessToken"}
     assert set(cleanup["includedPermissions"]) == {
-        "iam.roles.delete", "iam.serviceAccounts.delete", "storage.buckets.delete",
-        "storage.objects.delete", "bigquery.datasets.delete", "bigquery.tables.delete",
+        "storage.objects.list", "storage.objects.delete", "storage.buckets.delete",
+        "bigquery.datasets.delete", "bigquery.tables.delete",
     }
     assert permissions.isdisjoint(cleanup["includedPermissions"])
 
@@ -172,12 +192,13 @@ def test_root_hcl_parses_and_environment_names_are_isolated():
     # Use an installed parser only. It is optional; never install tooling from a test.
     hcl2 = pytest.importorskip("hcl2", reason="Optional offline HCL parser unavailable")
     root = INFRA / "terraform"
-    for path in [*root.glob("*.tf"), *root.glob("environments/*.example")]:
+    for path in [*root.glob("*.tf"), *root.glob("environments/*.example"),
+                 *root.glob("bootstrap/*.tf"), *root.glob("bootstrap/environments/*.example")]:
         with path.open() as handle:
             assert hcl2.load(handle)
     text = (root / "main.tf").read_text()
     assert 'identity_prefix = "${var.prefix}-${var.environment}"' in text
-    assert "prefix     = local.identity_prefix" in text
+    assert re.search(r"\bprefix\s+= local\.identity_prefix", text)
     assert 'dataset_id    = "${replace(var.prefix, "-", "_")}_${var.environment}"' in text
     variables = (root / "variables.tf").read_text()
     assert 'endswith(var.provisioner_service_account, "@${var.project_id}' in variables
@@ -194,14 +215,15 @@ def test_root_wiring_and_inventory_count():
     schemas.update({k: v["fields"] for k, v in bigquery_schemas()["tables"].items()})
     count = 0
     for name in ("identity", "storage", "bigquery"):
-        for instances in module(name)["resource"].values():
+        for instances in module(name).get("resource", {}).values():
             for resource in instances.values():
                 if "for_each" in resource:
                     assert resource["for_each"] == "${var.schemas}"
                     count += len(schemas)
                 else:
                     count += 1
-    assert count == 25
+    # M6K: runner, five custom roles and the project member are bootstrap-managed.
+    assert count == 18
     main = (INFRA / "terraform/main.tf").read_text()
     for resource in ("project_id", "region", "labels"):
         assert resource in main

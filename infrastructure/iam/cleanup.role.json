@@ -1,13 +1,12 @@
 {
   "title": "Financial pilot cleanup add-on candidate",
-  "description": "Review-only deletion add-on to provisioning access. Separate named-resource cleanup approval required; never grant to runtime.",
+  "description": "Gate D review-only deletion add-on to the provisioner role. Lists object generations for complete versioned deletion. Identity and custom-role removal belongs to the bootstrap root, not this add-on. Separate named-resource cleanup approval required; never grant to runtime.",
   "stage": "GA",
   "includedPermissions": [
-    "iam.roles.delete",
-    "iam.serviceAccounts.delete",
-    "storage.buckets.delete",
+    "storage.objects.list",
     "storage.objects.delete",
-    "bigquery.datasets.delete",
-    "bigquery.tables.delete"
+    "storage.buckets.delete",
+    "bigquery.tables.delete",
+    "bigquery.datasets.delete"
   ]
 }
