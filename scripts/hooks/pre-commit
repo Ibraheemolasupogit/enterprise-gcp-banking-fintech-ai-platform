@@ -1,0 +1,4 @@
+#!/bin/sh
+# M6L optional guard: refuses staged Terraform state, plans, inputs, keys and tokens.
+# Not active until the operator approves `git config core.hooksPath scripts/hooks`.
+exec python3 "$(git rev-parse --show-toplevel)/scripts/state_custody.py" staged

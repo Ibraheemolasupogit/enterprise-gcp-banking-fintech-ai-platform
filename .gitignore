@@ -75,3 +75,22 @@ reports/*
 *.tfvars
 *.tfvars.json
 crash.log
+crash.*.log
+# M6L: plan exports, local overrides, CLI config, backup containers and credential files.
+# Real state/plans/inputs belong outside the repository (docs/terraform_state_custody.md);
+# these patterns are defence in depth only and do not stop `git add -f`.
+*.tfplan.json
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+*.sparsebundle/
+*.sparseimage
+*.dmg
+*.age
+*.gpg
+*.p12
+application_default_credentials.json
+*service-account*key*.json
