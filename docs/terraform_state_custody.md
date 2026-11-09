@@ -6,9 +6,10 @@
 - **State root:** `~/.secure/ebank-pilot-dev-261031-k7m4/`, on the FileVault-protected internal Data volume.
 - **Permissions:** Terraform runs under `umask 077`; folders are `0700`; sensitive files are `0600`.
 - **Custodian:** the operator is the sole custodian.
-- **Retention (preliminary):** the latest 3 verified backups, kept for up to 30 days.
+- **Retention:** the latest 3 verified backups, kept for up to 30 days; **the newest verified backup is kept regardless of age** (confirmed in M6M).
+- **Backup destination (M6M):** a private OneDrive folder, `GCP-Banking-Terraform-Encrypted-Backups`, reached through the browser only. It holds only client-side AES-256-GCM ciphertext; see [terraform_state_backup_onedrive.md](terraform_state_backup_onedrive.md).
 
-Approving the design is not approval to create anything. **The independent encrypted backup destination is unresolved:** no medium exists or is assumed. `~` means the operator's macOS home directory, so no username is recorded. Tooling: [`scripts/state_custody.py`](../scripts/state_custody.py) (stdlib only, no cloud access).
+Approving the design is not approval to create anything. OneDrive is the selected backup destination (M6M), but nothing has been uploaded and the custody tree does not exist. `~` means the operator's macOS home directory, so no username is recorded. Tooling: [`scripts/state_custody.py`](../scripts/state_custody.py) (stdlib only, no cloud access).
 
 ## Proposed layout (FileVault-protected internal Data volume, outside Git and iCloud)
 
@@ -21,12 +22,15 @@ Approving the design is not approval to create anything. **The independent encry
 ├── inputs/bootstrap-dev.tfvars  inputs/pilot-dev.tfvars   0600
 ├── state/<root>/workspaces/                      0700  backend workspace_dir (must stay empty: default workspace only)
 ├── logs/                                         0700  only approved TF_LOG/crash output
+├── backups/outbox/  backups/inbox/                0700  M6M ciphertext only (*.tfstate.enc), staged for manual browser upload/download
+├── backups/ledger.jsonl                          0600  M6M backup ledger: hashes, serials, lineage, verification events (no contents)
+├── recovery/                                     0700  M6M restore tests; plaintext only transiently, 0600
 ├── evidence/runs/                                0700  PROPOSED home for relocated outputs/runs M6* evidence (separate approval)
 └── custody-log.md                                0600  backup ledger: hashes, serials, lineage (no contents)
 ```
 
 Why this location:
-- **The repository is not acceptable.** `~/Desktop` is synchronised by iCloud Desktop & Documents (M6L finding), so even git-ignored files under the repository are uploaded. `~/Documents`, `~/Downloads`, `~/Library/Mobile Documents` and `~/Library/CloudStorage` are rejected by `path_violations()`.
+- **The repository is not acceptable.** It was on the iCloud-synchronised `~/Desktop` (M6L finding) and is now at `~/Developer/` (relocated by the operator before M6M). Even so, state stays out of every working tree. `~/Documents`, `~/Downloads`, `~/Library/Mobile Documents` and `~/Library/CloudStorage` are rejected by `path_violations()`.
 - `~/.secure` is on the internal APFS Data volume, with FileVault verified On, and is not a file-provider domain.
 
 Ownership and isolation:
@@ -90,57 +94,50 @@ Operating rule: **one operator, one terminal, one root at a time.** No state eve
 
 ## Encrypted backup
 
-**Destination: UNRESOLVED.** No independent encrypted backup destination exists, and none is assumed. Until one is approved and its restore drill passes, there is **no backup**: the state has a single copy on the laptop, and no real state may be created. The candidate design, not approved, is:
-- a dedicated external SSD, formatted **APFS (Encrypted)**, holding one **AES-256 encrypted sparse bundle** `ebank-pilot-state-backups.sparsebundle` created with `hdiutil`, giving two independent passphrases;
-- the drive stored physically apart from the laptop.
+**Destination: OneDrive via the browser (selected by the user in M6M; not yet used).** The full operator runbook is [terraform_state_backup_onedrive.md](terraform_state_backup_onedrive.md). In outline:
+- `scripts/state_backup.py create --root <root>` encrypts the custody state with AES-256-GCM, using a key derived by scrypt from an operator passphrase held in the password manager. It writes one `*.tfstate.enc` file to `backups/outbox/` and records it in `backups/ledger.jsonl`.
+- The operator uploads that file manually in the browser, downloads it back into `backups/inbox/`, and runs `verify-download`. That command byte-compares the file with the ledger, decrypts it in `recovery/`, validates it and deletes the plaintext. Only then does the backup count as verified.
+- The real commands refuse to run inside a Claude Code session or without a TTY.
 
-Destinations rejected:
-- Cloud and sync services: third-party custody and conflict risk.
-- A GCS bucket in the pilot project: the provisioner's bucket rights could alter its own custody (M6J).
-- An internal-only image: it shares the laptop's failure domain.
+The earlier cloud rejection ("third-party custody and conflict risk") is addressed as follows:
+- Microsoft holds only ciphertext, encrypted under a key it never sees.
+- There is no sync client, and file names are immutable and unique, so no sync conflicts or lineage forks can occur.
 
-**Recovery-key custody:**
-- Generate a random passphrase of at least 32 characters for each of the drive and the image.
-- Store both in the operator's password manager, plus a sealed paper copy kept apart from the drive.
-- Do not store them in the macOS keychain: always use `-stdinpass` and decline keychain prompts. Never share them with tooling or assistants.
-- Separately confirm that the Mac's own FileVault recovery key is escrowed. That was not verified here.
+Still rejected:
+- a GCS bucket in the pilot project, because the provisioner could alter its own custody (M6J);
+- an internal-only image, because it shares the laptop's failure domain.
+
+The external-SSD and `hdiutil` sparse-bundle candidate from M6L is not pursued. The M6L `drill` is kept as a regression test.
+
+**Passphrase custody:**
+- Use one random passphrase of at least 32 characters (the tool refuses fewer than 24). Store it in the operator's password manager, plus a sealed paper copy kept apart from the laptop.
+- It must not be the Microsoft account password. Never store it in Git, OneDrive, notes, shell history or assistant prompts.
+- Separately confirm that the Mac's FileVault recovery key is escrowed. That has not been verified.
 
 **When to back up:**
 - after every successful apply;
 - before any `state rm/mv/import/push` or backend migration;
 - after any restore.
 
-**Procedure:**
-1. Mount read-write with `-stdinpass -nobrowse`.
-2. Create a new snapshot directory `<root>/<UTC>-serial-NNNNNN/`. Snapshots are created exclusively (`O_EXCL`) and never overwritten.
-3. Write `terraform.tfstate` and `MANIFEST.json` (SHA256, serial, lineage, Terraform version, plus Git commit and saved-plan SHA256).
-4. Detach.
-5. Append the hash, serial and timestamp to `custody-log.md`.
-
-The drill exercises these same snapshot and verify functions. A real `backup` command is to be added at the state gate.
-
-**Retention (approved, preliminary):** keep the **latest 3 verified backups**, for **up to 30 days**. A backup counts only after its manifest hash, lineage and serial verify on the medium. Deletion is a manual, logged custodian action recorded in `custody-log.md`.
-
-**Open point for confirmation:** if no apply happens for more than 30 days, the age limit alone would delete every backup. The proposed reading is that the newest verified backup is never deleted by age.
+**Retention (confirmed):** applied per root.
+- Keep the **newest verified backup regardless of age**.
+- Keep up to **3** of the most recent verified backups while they are **≤ 30 days** old.
+- Run `state_backup.py retention` to see which backups may be deleted. Deletion is manual, in the browser, and is recorded with `mark-deleted`, which refuses to release a retained backup.
+- Unverified files never count.
 
 ## Restore (and independent restore test)
 
-1. Attach the image **read-only**. Verify `MANIFEST.json`: hash, lineage equal to the custody log, and the expected serial.
-2. Copy to a fresh 0700 recovery directory. Never restore directly over live state.
-3. Run `terraform show -json <file>` to prove it parses offline.
+1. Download the backup into `backups/inbox/`. Run `verify-download --root <root> --file <name>`, which checks the GCM tag, the name/header/manifest/state agreement on root, timestamp and serial, the SHA256, the lineage and the ledger byte match.
+2. For a real recovery, add `--keep-plaintext`. The state is left in a fresh 0700 `recovery/restore-*/` directory. Never restore directly over live state.
+3. Run `terraform show -json <file>` (with `CHECKPOINT_DISABLE=1`) to prove the restored file parses offline.
 4. Only then, under an approved recovery change, replace the live file. A serial lower than the last recorded one needs explicit approval.
 5. Any reconciling `plan -refresh-only` is a cloud action requiring its own approval.
 
-**Independent test without real state:** `M6L_RUN_DRILL=1 python3 -m pytest tests/test_state_custody.py -k drill`, or `python3 scripts/state_custody.py drill --workdir <dir>`. The drill:
-- writes a synthetic fixture (`lineage m6l-fixture-*`, zero resources) under umask 077;
-- backs it up into a throw-away AES-256 sparse bundle with a random in-memory passphrase;
-- deletes the live copy;
-- checks that a wrong passphrase is rejected;
-- restores read-only and verifies hash, lineage, serial and 0600 mode;
-- checks that tampering is detected and that Terraform parses the restored file;
-- removes everything.
+**Independent test without real state:**
+- `python3 scripts/state_backup.py drill` (M6M; part of the default `pytest` run) exercises the full OneDrive workflow on synthetic `m6m-fixture-*` states for both roots in a temporary fake home, with a simulated OneDrive directory. It covers create, upload, download, verify and state loss, and rejects a wrong passphrase, a bit flip, truncation, a forged header root and a cross-root restore. It also checks the retention plan and cleans up.
+- The older M6L `hdiutil` drill (`M6L_RUN_DRILL=1`) remains available.
 
-Run it with `--workdir` on the backup medium to test that drive. Once real state exists, repeat steps 1–3 against the latest real snapshot before each apply gate.
+Once real state exists, repeat step 1 against the newest real backup of each root before each apply gate.
 
 ## Plans, logs, outputs and credentials
 
@@ -154,13 +151,14 @@ Run it with `--workdir` on the backup medium to test that drive. Once real state
 
 ## Approvals required before any real state exists
 
-1. Create the custody tree at the exact path and modes above, plus the Spotlight exclusion.
-2. Choose the backup medium, then format it as APFS (Encrypted). **Formatting destroys the drive's contents.**
-3. Create the backup image and set up passphrase custody (operator-only).
-4. Run the restore drill on that medium and record the evidence.
-5. ~~Name the custodian and approve retention~~: **approved at design level** (operator as sole custodian; latest 3 verified backups, up to 30 days; age-limit edge case open).
-6. Relocate the repository out of `~/Desktop`, and the `outputs/runs` M6* evidence into custody. The procedure is proposed in [M6L evidence](upgrade/m6l_validation.md#m6l-closeout-2026-11-09); execution is not approved.
+1. Create the custody tree at the exact path and modes above, including `backups/outbox`, `backups/inbox` and `recovery`, plus the Spotlight exclusion.
+2. ~~Choose the backup medium~~: **OneDrive selected (M6M).** The operator still confirms the folder is private, MFA is on, and no sync client is linked.
+3. Generate the backup passphrase in the password manager and make the sealed paper copy (operator-only).
+4. Run a browser round trip with a **synthetic** encrypted fixture before any real state exists. Not yet implemented: it needs a small `rehearse` command and its own approval.
+5. ~~Name the custodian and approve retention~~: **approved**, including the newest-verified-regardless-of-age rule.
+6. ~~Relocate the repository out of `~/Desktop`~~: done by the operator. The `outputs/runs` M6* evidence relocation into custody is still open (needs gate 1).
 7. Optionally install the pre-commit hook.
 8. Approve the backend code change: `backend "local" {}` plus the `path` and `workspace_dir` partial config, the `TF_DATA_DIR` convention and the mandatory `check --root` preflight. This must precede or accompany gate 1.
+9. ~~Declare the `cryptography` dependency~~: **done (M6M hardening).** `cryptography>=46.0.0,<51` is in `pyproject.toml` and `requirements.txt`.
 
 Only after these can the M6K bootstrap gates proceed.

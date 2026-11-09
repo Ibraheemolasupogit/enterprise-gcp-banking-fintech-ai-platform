@@ -1,9 +1,10 @@
-pandas
+pandas>=2.2,<3
 numpy
 scikit-learn
 pydantic
 PyYAML
 Jinja2
+cryptography>=46.0.0,<51
 networkx
 matplotlib
 pytest

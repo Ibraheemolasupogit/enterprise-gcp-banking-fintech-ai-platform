@@ -41,6 +41,12 @@ LAYOUT = {
     "tfdata/pilot-dev": None,
     "inputs": None,
     "logs": None,
+    # M6M: ciphertext-only staging for the manual OneDrive upload/download, and a private
+    # directory for restore tests (scripts/state_backup.py). Created only at gate 1.
+    "backups": None,
+    "backups/outbox": None,
+    "backups/inbox": None,
+    "recovery": None,
 }
 # Terraform root directories (relative to the repository) keyed by custody root name.
 ROOTS = {"bootstrap": Path("infrastructure/terraform/bootstrap"),

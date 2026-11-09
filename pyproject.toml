@@ -13,11 +13,15 @@ authors = [
 ]
 dependencies = [
   "Jinja2",
+  # M6M state backups (scripts/state_backup.py): AES-256-GCM. Tested at both bounds.
+  "cryptography>=46.0.0,<51",
   "PyYAML",
   "matplotlib",
   "networkx",
   "numpy",
-  "pandas",
+  # <3: the synthetic v2 contract relies on object-dtype string columns; pandas 3 defaults
+  # to the new str dtype. Both bounds tested in clean environments (M6M).
+  "pandas>=2.2,<3",
   "pydantic",
   "scikit-learn"
 ]
