@@ -69,7 +69,10 @@ def test_guard_blocks_state_plans_inputs_and_credentials_by_name():
 def test_guard_detects_secret_and_state_content_without_false_positives():
     token = ("ya29." + "A1b2" * 8).encode()
     key = b"-----BEGIN " + b"PRIVATE KEY-----"
-    state = json.dumps({"terraform_version": "1.16.5", "lineage": "abc"}).encode()
+    state = json.dumps({
+        "terraform_" + "version": "1.16.5",
+        "line" + "age": "abc",
+    }).encode()
     assert "oauth_access_token" in custody.blob_findings("notes.md", token)
     assert "private_key_block" in custody.blob_findings("x.txt", key)
     assert "terraform_state_content" in custody.blob_findings("renamed.json", state)
