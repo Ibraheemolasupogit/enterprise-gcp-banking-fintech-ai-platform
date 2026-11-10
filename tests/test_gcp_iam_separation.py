@@ -151,8 +151,11 @@ def test_bootstrap_inventory_is_additive_and_bounded():
         assert forbidden not in text
     for name in ("runner", "provisioner"):
         assert "prevent_destroy = true" in block(text, "google_service_account", name)
-    assert 'service = "iamcredentials.googleapis.com"' in block(
-        text, "google_project_iam_audit_config", "iamcredentials")
+    # M6Q: Service Account Credentials Data Access logging is configured on the IAM service;
+    # an independent iamcredentials.googleapis.com auditConfig is rejected by the API.
+    audit = block(text, "google_project_iam_audit_config", "iamcredentials")
+    assert 'service = "iam.googleapis.com"' in audit
+    assert "iamcredentials.googleapis.com" not in text and "allServices" not in text
 
 
 def test_bootstrap_never_runs_as_the_provisioner():

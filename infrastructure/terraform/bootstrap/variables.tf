@@ -59,5 +59,5 @@ variable "access_expiry" {
 variable "token_audit_logging_enabled" {
   type        = bool
   default     = true
-  description = "Enable IAM Credentials ADMIN_READ/DATA_READ audit logs. Changes project auditConfigs; included in bootstrap approval."
+  description = "Enable ADMIN_READ/DATA_READ audit logs for token minting (Service Account Credentials), configured on the iam.googleapis.com auditConfig entry. Changes project auditConfigs; included in bootstrap approval."
 }

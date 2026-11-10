@@ -133,12 +133,15 @@ resource "google_service_account_iam_member" "operator_impersonation" {
   }
 }
 
-# Records GenerateAccessToken calls (Data Access logs are off by default). Scoped to the
-# IAM Credentials service only; other services' audit configuration is untouched.
+# Records GenerateAccessToken calls (Data Access logs are off by default). M6Q: Service Account
+# Credentials API Data Access logging is configured on iam.googleapis.com; the API rejects a
+# separate auditConfig for the IAM Credentials service (failed in the first bootstrap apply).
+# Scoped to the IAM service entry only; no all-services entry and no other service is touched.
+# The address keeps its M6K name so the recovery plan adds exactly this one instance.
 resource "google_project_iam_audit_config" "iamcredentials" {
   count   = var.token_audit_logging_enabled ? 1 : 0
   project = var.project_id
-  service = "iamcredentials.googleapis.com"
+  service = "iam.googleapis.com"
   audit_log_config {
     log_type = "ADMIN_READ"
   }

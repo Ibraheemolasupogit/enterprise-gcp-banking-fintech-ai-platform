@@ -63,7 +63,7 @@ Inputs: `provisioner_access_enabled = false`, `token_audit_logging_enabled = tru
 | `google_service_account.runner` (`bankpilot-dev-runner`), `google_service_account.provisioner` (`bankpilot-dev-provisioner`) | 2 × create (keyless, `prevent_destroy`) |
 | `google_project_iam_custom_role.runtime["jobs"\|"metadata"\|"objects"\|"readers"\|"tables"]`, `.provision`, `.impersonate` | 7 × create (`prevent_destroy`) |
 | `google_project_iam_member.runner_jobs` | 1 × create (additive, unconditional) |
-| `google_project_iam_audit_config.iamcredentials` | 1 × create: ADMIN_READ and DATA_READ for `iamcredentials.googleapis.com` only |
+| `google_project_iam_audit_config.iamcredentials` | 1 × create: ADMIN_READ and DATA_READ for `iamcredentials.googleapis.com` only. **Superseded by M6Q:** the API rejected this service entry; the service is now `iam.googleapis.com` ([M6Q](m6q_validation.md)) |
 | **Total** | **11 to add, 0 to change, 0 to destroy.** The Owner binding and every other binding are untouched |
 
 The later access window (a separate approval) re-plans with `provisioner_access_enabled = true` and an exact UTC `access_expiry` no more than 8 h ahead. That adds the conditional `google_project_iam_member.provisioner` and `google_service_account_iam_member.operator_impersonation`: 2 creates, 0 changes.
@@ -180,6 +180,8 @@ env -i HOME="$HOME" PATH="$PATH" TERM="$TERM" /bin/sh -c '
 shasum -a 256 "$P"; stat -f '%Lp' "$P"                                  # expect 600
 
 # 4. Review: human diff in your own terminal, then the summary checker (prints counts/addresses only).
+#    SUPERSEDED (M6Q): this inline checker expects the rejected iamcredentials service. Use
+#    scripts/bootstrap_plan_check.py --mode recovery|initial instead (docs/upgrade/m6q_validation.md).
 #    No token here: show is offline, and the wrapper refuses a token for offline commands.
 env -i HOME="$HOME" PATH="$PATH" TERM="$TERM" python3 scripts/terraform_custody.py run --root bootstrap -- show "$P"
 env -i HOME="$HOME" PATH="$PATH" python3 scripts/terraform_custody.py run --root bootstrap -- show -json "$P" \
