@@ -269,7 +269,7 @@ The checker does **not** require this drift. A revoke plan with no drift, or wit
 
 | Mode | Tolerated etag-only drift |
 | --- | --- |
-| `access` | `google_project_iam_member.runner_jobs` (unchanged) |
+| `access` | `google_project_iam_member.runner_jobs`, and since M6T also `google_project_iam_audit_config.iamcredentials[0]` ([M6T](m6t_validation.md#access-mode-audit-config-etag-drift-m6t)) |
 | `revoke` | `google_project_iam_member.runner_jobs` and `google_project_iam_audit_config.iamcredentials[0]` |
 | `initial`, `recovery`, `pilot` | None |
 

@@ -125,12 +125,83 @@ The live dataset's current default access, including the creator OWNER entry, ma
 
 The earlier M6T checker mutations remain covered.
 
+## Access-mode audit-config etag drift (M6T)
+
+**Observed (operator):** the bootstrap access plan for the recovery window (commit `c5e89fb`) was rejected by `--mode access`. Besides the already-accepted `runner_jobs` etag drift, `resource_drift` held `google_project_iam_audit_config.iamcredentials[0]` with `actions = ["update"]`. Independent inspection confirmed **only `etag` differed**. The grants remain revoked, and no recovery deployment has occurred.
+
+**Cause (consistent with M6S analysis):**
+- both resources store the **project IAM policy** etag;
+- the M6S revoke apply deleted `provisioner[0]`, rewriting the project policy after the audit config's etag was last recorded;
+- the next refresh therefore reports a new etag although the audit configuration is unchanged.
+
+The revoke mode already tolerated exactly this; access mode did not.
+
+**Change:**
+- `ETAG_DRIFT_BY_MODE["access"]` is now `{runner_jobs, iamcredentials[0]}`, the same set as revoke;
+- the exception reuses the **identical** strict check, `etag_drift_problems`;
+- the access report's `accepted_etag_drift` is now sorted;
+- nothing else changed.
+
+The pilot-recovery requirements are unchanged: one dataset-policy create, 17 no-ops, strict drift rejection.
+
+**What the audit-config exception guarantees (shared with revoke):**
+- **Identity:** the exact address, managed, with type `google_project_iam_audit_config`, name `iamcredentials` and index `0`; actions exactly `["update"]`.
+- **Shape:** `before` and `after` have exactly `audit_log_config`, `etag`, `id`, `project` and `service`. Each log-config entry has exactly `exempted_members` and `log_type`.
+- **Change:** every non-etag attribute is identical. Even `exempted_members: []` versus `null` is rejected. Both etags are non-empty and differ, and there is no `true` leaf in `after_unknown`.
+- **Approved values on both sides:**
+  - service `iam.googleapis.com`;
+  - this project;
+  - log types exactly `ADMIN_READ` and `DATA_READ`;
+  - no exemptions;
+  - a non-empty `id`.
+- **At most one entry per address.** Any other drift address is rejected, including the conditional grants, roles and service accounts.
+- **Everything else in access mode still applies:**
+  - the audit config and `runner_jobs` stay `no-op` in `resource_changes`;
+  - exactly 2 conditional creates, ≤ 8 h, for the single named operator;
+  - the variables are checked;
+  - forbidden text is rejected.
+- **Modes:** `initial`, `recovery` and the pilot modes still tolerate no drift.
+
+**Tests:** 55 new tests in `tests/test_access_window_plan_check.py`, replacing the old "access rejects audit drift" test.
+- **Positive:** access plans with no drift, runner only, audit only, or both in either order.
+- **36 revoke-suite audit and drift-set mutations, applied to access plans:** service, log types, exemptions, keys, `id`, project, etag, null sides, nested unknowns, actions, index, name, type, mode, duplicates, runner changes, `provisioner[0]` or impersonation drift, role drift, deletes in the changes.
+- **10 access-specific cases with both drifts present:**
+  - access disabled;
+  - an unconditional grant;
+  - the impersonation member changed, or its role widened;
+  - the audit config updated in the changes;
+  - an audit service, log-type or exemption change;
+  - the wrong index;
+  - a third drift entry.
+- **No regressions:** all 20 earlier access adversarial cases still fail with both drifts present.
+- **`[]` versus `null`:** rejected in both access and revoke.
+- **Other modes:** the tolerance is confirmed absent from initial and recovery.
+
+**Mutation check:** 10 mutations, all detected:
+- access reverted to runner only;
+- `provisioner[0]` tolerated in access;
+- audit tolerated in initial;
+- duplicates accepted;
+- exemptions unchecked;
+- log types unchecked;
+- audit values unchecked;
+- a log-config change ignored;
+- index unchecked;
+- an unchanged etag accepted.
+
+"Log-config change ignored" survived at first, because both sides were already pinned to approved values. The `[]` versus `null` test now covers it. The file was restored byte-identical.
+
+**Remaining risks of this exception:**
+- **A new etag proves only that the project policy was rewritten.** Pre-check A2 (the live project policy baseline) and the post-apply read-backs remain mandatory.
+- **The exception widens access-mode acceptance** only for etag churn on two resources whose security-relevant values are pinned on both sides. Any schema change fails closed.
+- **Regenerate the plan.** The rejected access plan is not reused; approve the regenerated plan by its new SHA-256.
+
 ## Validation
 
 | Check | Result |
 | --- | --- |
-| Full `pytest` | **1036 passed, 1 skipped** |
-| `make gcp-offline-check` | **792 passed, 1 skipped**; `terraform fmt` passed |
+| Full `pytest` | **1090 passed, 1 skipped** |
+| `make gcp-offline-check` | **846 passed, 1 skipped**; `terraform fmt` passed |
 | `ruff check .` | Passed |
 | `terraform fmt -check -recursive` | Passed |
 | Docs validator, `git diff --check` | Passed |

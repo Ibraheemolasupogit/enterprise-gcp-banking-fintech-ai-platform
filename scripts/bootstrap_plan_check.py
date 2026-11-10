@@ -263,7 +263,9 @@ ETAG_DRIFT_SPECS = {
                     _audit_values_ok, "the approved iam.googleapis.com audit config"),
 }
 # Which etag-only drift each mode tolerates. Every other mode tolerates none.
-ETAG_DRIFT_BY_MODE = {"access": frozenset({RUNNER_GRANT}),
+# M6T: access mode also tolerates the audit config, after a revoke apply rewrote the project
+# policy (verified by operator inspection: only etag differed). Same strict validation.
+ETAG_DRIFT_BY_MODE = {"access": frozenset({RUNNER_GRANT, AUDIT_ADDRESS}),
                       "revoke": frozenset({RUNNER_GRANT, AUDIT_ADDRESS})}
 
 
@@ -352,7 +354,7 @@ def _check_bootstrap(plan: dict, mode: str, iam: Path) -> dict:
     report.update(mode=mode, problems=problems, ok=not problems)
     if mode == "access":
         report.update(access_expiry=ctx.get("expiry"), window_hours=ctx.get("window_hours"),
-                      accepted_etag_drift=etag_drift)
+                      accepted_etag_drift=sorted(etag_drift))
     if mode == "revoke":
         report.update(already_removed=sorted(already_removed),
                       accepted_etag_drift=sorted(etag_drift))

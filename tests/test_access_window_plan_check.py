@@ -675,12 +675,82 @@ def test_revoke_adversarial_cases_still_fail_with_etag_drift_present():
         assert not bpc.check_plan(p, "revoke")["ok"], name
 
 
-def test_access_mode_still_rejects_audit_etag_drift():
-    p = access_plan_with_etag_drift()
-    p["resource_drift"].append(_audit_drift())
-    r = bpc.check_plan(p, "access")
-    assert f"drift detected outside Terraform: {bpc.AUDIT_ADDRESS}" in r["problems"]
-    assert r["accepted_etag_drift"] == [bpc.RUNNER_GRANT]
+# ---------------------------------------------------------------- M6T access audit etag drift
+
+def _access_with(*entries):
+    p = access_plan()
+    p["resource_drift"] = [e() for e in entries]
+    return p
+
+
+@pytest.mark.parametrize("entries", [
+    (), (_etag_drift,), (_audit_drift,), (_etag_drift, _audit_drift),
+    (_audit_drift, _etag_drift)])
+def test_access_accepts_exact_audit_and_runner_etag_only_drift(entries):
+    r = bpc.check_plan(_access_with(*entries), "access")
+    assert r["ok"], r["problems"]
+    assert r["creates"] == 2 and r["unchanged"] == 11 and r["deletes"] == 0
+    assert r["accepted_etag_drift"] == sorted(e()["address"] for e in entries)
+
+
+# Audit-config shape and drift-set mutations from the revoke suite, applied to access plans.
+# Excluded: cases whose meaning depends on revoke-only expectations.
+ACCESS_AUDIT_BAD = {k: v for k, v in AUDIT_BAD.items()
+                    if k not in ("access re-enabled",)}
+
+
+@pytest.mark.parametrize("name", sorted(ACCESS_AUDIT_BAD))
+def test_adversarial_access_audit_drift_is_rejected(name):
+    p = _access_with(_etag_drift, _audit_drift)
+    ACCESS_AUDIT_BAD[name](p)
+    assert not bpc.check_plan(p, "access")["ok"], name
+
+
+@pytest.mark.parametrize("name,mutate", [
+    ("access disabled", lambda p: p["variables"]["provisioner_access_enabled"].update(
+        value=False)),
+    ("grant created unconditionally", lambda p: _by(p, bpc.PROVISIONER_GRANT)["change"][
+        "after"].update(condition=[])),
+    ("impersonation member changed", lambda p: _by(p, bpc.IMPERSONATION_GRANT)["change"][
+        "after"].update(member="user:someone-else@example.invalid")),
+    ("impersonation role widened", lambda p: _by(p, bpc.IMPERSONATION_GRANT)["change"][
+        "after"].update(role="roles/iam.serviceAccountTokenCreator")),
+    ("audit config updated in changes", lambda p: _by(p, bpc.AUDIT_ADDRESS)["change"].update(
+        actions=["update"])),
+    ("audit service changed on both drift sides", lambda p: [
+        p["resource_drift"][1]["change"][s].update(service="allServices")
+        for s in ("before", "after")]),
+    ("audit DATA_READ removed after", lambda p: p["resource_drift"][1]["change"]["after"][
+        "audit_log_config"].pop()),
+    ("audit exemption added on both", lambda p: [
+        p["resource_drift"][1]["change"][s]["audit_log_config"][0].update(
+            exempted_members=["user:x@example.invalid"]) for s in ("before", "after")]),
+    ("audit drift on wrong index", lambda p: p["resource_drift"][1].update(index=None)),
+    ("third drift entry", lambda p: p["resource_drift"].append(
+        {"address": "google_service_account.runner", "change": {"actions": ["update"]}})),
+])
+def test_access_adversarial_with_both_drifts(name, mutate):
+    p = _access_with(_etag_drift, _audit_drift)
+    mutate(p)
+    assert not bpc.check_plan(p, "access")["ok"], name
+
+
+def test_access_adversarial_cases_still_fail_with_both_drifts_present():
+    for name, mutate in ACCESS_BAD.items():
+        p = _access_with(_etag_drift, _audit_drift)
+        mutate(p)
+        assert not bpc.check_plan(p, "access")["ok"], name
+
+
+def test_audit_drift_still_refused_in_initial_recovery_and_pilot():
+    p = revoke_plan()
+    p["resource_changes"] = p["resource_changes"][:-2]
+    p["resource_drift"] = [_audit_drift()]
+    for mode in ("initial", "recovery"):
+        assert (f"drift detected outside Terraform: {bpc.AUDIT_ADDRESS}"
+                in bpc.check_plan(p, mode)["problems"]), mode
+    assert bpc.ETAG_DRIFT_BY_MODE.keys() == {"access", "revoke"}
+    assert bpc.ETAG_DRIFT_BY_MODE["access"] == {bpc.RUNNER_GRANT, bpc.AUDIT_ADDRESS}
 
 
 def test_audit_drift_helper_layers_directly():
@@ -709,3 +779,15 @@ def test_both_sides_are_checked_against_approved_values():
         problems = bpc.etag_drift_problems(d, addr)
         assert f"{addr}: drift changes more than etag: ['{key}']" in problems
         assert any(p.startswith(f"{addr}: drift values are not") for p in problems)
+
+
+@pytest.mark.parametrize("mode", ["access", "revoke"])
+def test_any_non_etag_audit_difference_is_rejected_even_if_both_sides_look_approved(mode):
+    """Both sides individually pass the approved-value rule, but they differ (exempted_members
+    [] vs null): still a non-etag change, so fail closed."""
+    d = _audit_drift()
+    d["change"]["after"]["audit_log_config"][0]["exempted_members"] = None
+    assert bpc.etag_drift_problems(d, bpc.AUDIT_ADDRESS) == [
+        f"{bpc.AUDIT_ADDRESS}: drift changes more than etag: ['audit_log_config']"]
+    p = (_access_with if mode == "access" else revoke_plan_with_drift)(_etag_drift, lambda: d)
+    assert not bpc.check_plan(p, mode)["ok"]
