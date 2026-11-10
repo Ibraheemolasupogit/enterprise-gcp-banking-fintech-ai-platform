@@ -196,12 +196,103 @@ The pilot-recovery requirements are unchanged: one dataset-policy create, 17 no-
 - **The exception widens access-mode acceptance** only for etag churn on two resources whose security-relevant values are pinned on both sides. Any schema change fails closed.
 - **Regenerate the plan.** The rejected access plan is not reused; approve the regenerated plan by its new SHA-256.
 
+## Recovery-checker corrections for observed refresh representations (M6T)
+
+**Observed (operator saved-plan inspection):** the pilot recovery plan proposed exactly 1 create and 17 unchanged resources, but `--mode pilot-recovery` reported 12 problems. The access window is active until 2026-11-10 14:50 UTC. This task made no cloud or Terraform call and did not touch custody files.
+
+### 1. Table IAM `table_id` representation (3 problems)
+
+**What the plan showed:** after refresh, the provider reports `google_bigquery_table_iam_member.table_id` in its fully qualified form, `projects/ebank-pilot-dev-261031-k7m4/datasets/bankpilot_dev/tables/<table>`.
+
+**Why the checker failed:** it derived the runner's role from `table_id`. A fully qualified id never matched the reader-table names, so `accounts`, `customers` and `curated_transactions` were expected to carry the `tables` role instead of `readers`. The other four tables passed by coincidence.
+
+**Fix:**
+- the table is now taken from the **instance key** in the address (`runner["<table>"]`), which must be one of the 7 pilot tables;
+- `table_id` must be exactly that table, bare (the configured value, on create) or as that exact fully qualified path for **this** project and dataset;
+- `dataset_id`, if present, must be `bankpilot_dev`;
+- the member must be the runner, with the role derived from the key (`readers` for the 3 reader tables, `tables` otherwise), and with no condition.
+
+### 2. Refresh metadata drift (9 problems)
+
+**What the plan showed:** `resource_drift` held exactly 9 `update` entries:
+- the dataset and the 7 tables, where only `etag`, `last_modified_time` and `resource_tags` (`null` → `{}`) differ;
+- the bucket, where only `updated` differs.
+
+**Fix:** `pilot_metadata_drift_problems`, used **in `pilot-recovery` mode only.** An entry is accepted only if all of the following hold:
+- **Address:** exactly one of those 9 managed addresses, with the matching type, managed mode and at most one entry per address. Any other address is rejected, including the table IAM members, the bucket policy, the dataset policy and unknown tables.
+- **Shape:** actions exactly `["update"]`; `before` and `after` are objects with **identical attribute sets**; no `true` leaf in `after_unknown`; at least one attribute differs.
+- **Only these attributes may differ:**
+  - BigQuery dataset and tables: `etag`, `last_modified_time`, `resource_tags`;
+  - bucket: `updated`.
+
+  Schema, labels, location, deletion protection, dataset `access`, bucket security settings and everything else must be **identical**, so a security change cannot ride along with the metadata.
+- **Approved transitions:**
+  - `etag`: non-empty strings. For BigQuery, `etag` and `last_modified_time` must change **together**, since a modification bumps both. `resource_tags` changing alone (`null` → `{}`, a provider representation change) is accepted.
+  - `last_modified_time`: positive integer epoch milliseconds (booleans and strings rejected), strictly increasing, and not later than the plan `timestamp` plus 5 minutes.
+  - `resource_tags`: exactly `null` → `{}`. Any tag, or `{}` → `null`, is rejected.
+  - bucket `updated`: an RFC 3339 timestamp with a zone, strictly increasing, with the same upper bound. A missing plan timestamp is rejected.
+- **Unchanged rules:** the 17 resources must still be `no-op` in `resource_changes`, and their refreshed values must still pass every existing check, alongside the dataset-policy D1 rule and variable checks. The report lists the accepted entries as `accepted_metadata_drift`.
+- **Mode isolation:** `pilot` (fresh deployment) and all bootstrap modes still reject this drift. The bootstrap etag exceptions are unchanged and disjoint from these addresses.
+
+**Evidence still limited:** the transitions are modelled on the operator's description of the saved plan, not on the plan file, which this task could not read. If the real values use another representation, the checker **fails closed** and names the attribute. Examples: `last_modified_time` as a string, `updated` with nanoseconds or no zone, or another attribute differing. Report that message rather than relaxing the rule.
+
+### Tests
+
+80 new tests in `tests/test_pilot_recovery_plan_check.py` (163 in the file). The recovery fixture now uses the observed fully qualified `table_id`.
+- **Table identity, positive:** for 3 reader tables and 1 writer table, both the fully qualified and the bare forms pass.
+- **Table identity, 16 rejected:**
+  - another project's, dataset's or table's path;
+  - another table's bare id;
+  - a path suffix, a `//bigquery…` prefix, an upper-cased path, a missing `table_id`;
+  - another `dataset_id`;
+  - a reader widened to `tables` or `dataEditor`, or a writer narrowed;
+  - a conditional binding;
+  - a provisioner or user member, another project.
+- **Metadata drift, positive:** all 9 observed entries pass, with `accepted_metadata_drift` = 9, 1 create and 17 unchanged. Subsets, no drift, and a `resource_tags`-only change also pass.
+- **Metadata drift, 41 rejected:**
+  - **hidden security changes:** table schema, protection or labels; dataset location, `access` or labels; bucket public access, uniform access, versioning, location or labels;
+  - **bad transitions:** tags added, `{}` → `null`, timestamps backwards, an etag without a timestamp change or the reverse, string or bool timestamps, timestamps after the plan, an empty etag, bucket `updated` backwards, in the future, malformed or without a zone;
+  - **shape and identity:** an attribute added or missing, unknown values, a null `after`, delete, replace, create or no-op actions, the wrong type, data mode, no actual change, a duplicate entry;
+  - **wrong addresses:** drift on a table member, the bucket policy, the dataset policy or an unknown table;
+  - a missing plan timestamp.
+- **Isolation:** `pilot` and every bootstrap mode reject the drift, and the address sets are disjoint from the bootstrap exceptions.
+- **Direct tests:** the helper's messages, and the epoch-millisecond parser rejecting bool, 0, negative, float, string and null values.
+
+**Mutation check:** 18 mutations, all detected. The files were restored byte-identical.
+- **Table identity:**
+  - any `table_id` accepted;
+  - reader role ignored;
+  - table-member dataset unchecked.
+- **Drift:**
+  - drift tolerated in `pilot` mode;
+  - duplicates accepted;
+  - non-metadata changes accepted;
+  - attribute sets unchecked;
+  - unknowns accepted;
+  - empty drift accepted;
+  - etag and timestamp decoupled;
+  - any `resource_tags` change accepted;
+  - timestamps allowed backwards;
+  - future timestamps accepted;
+  - bool timestamps accepted;
+  - any drift action accepted;
+  - type and mode unchecked;
+  - an empty etag accepted.
+
+"Bool timestamps" survived the first pass because `True` behaves as 1 ms and already fails the forward check; a direct parser test now catches it.
+
+### Remaining risks
+
+- **The checker models the described plan, not the file.** A differing real representation fails closed and needs a new reviewed change, not a relaxed rule.
+- **A timestamp upper bound only proves plausibility,** not why the resource changed. The metadata churn is consistent with the failed dataset-policy write and the provider refresh, but the cause is not proven offline. All non-metadata attributes being identical is the security guarantee.
+- **The plan must be regenerated** and approved by its new SHA-256. With the window ending at 14:50 UTC, do not start an apply that cannot finish, back up and revoke in time. Expiry remains the hard stop.
+
 ## Validation
 
 | Check | Result |
 | --- | --- |
-| Full `pytest` | **1090 passed, 1 skipped** |
-| `make gcp-offline-check` | **846 passed, 1 skipped**; `terraform fmt` passed |
+| Full `pytest` | **1170 passed, 1 skipped** |
+| `make gcp-offline-check` | **926 passed, 1 skipped**; `terraform fmt` passed |
 | `ruff check .` | Passed |
 | `terraform fmt -check -recursive` | Passed |
 | Docs validator, `git diff --check` | Passed |

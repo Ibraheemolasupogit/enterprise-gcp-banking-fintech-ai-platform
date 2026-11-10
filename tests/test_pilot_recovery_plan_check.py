@@ -44,6 +44,11 @@ def _rc(address, kind, name, values, actions, mode="managed"):
                        "after": None if actions == ["delete"] else values}}
 
 
+def fq(table: str) -> str:
+    """The provider's refreshed table_id representation (observed in the M6T saved plan)."""
+    return f"projects/{P}/datasets/bankpilot_dev/tables/{table}"
+
+
 def recovery_plan() -> dict:
     """17 created resources unchanged (as refreshed after the partial apply) + 1 create."""
     rcs = [
@@ -77,7 +82,7 @@ def recovery_plan() -> dict:
         role = "readers" if t in bpc.READER_TABLES else "tables"
         rcs.append(_rc(f'module.bigquery.google_bigquery_table_iam_member.runner["{t}"]',
                        "google_bigquery_table_iam_member", "runner",
-                       {"project": P, "dataset_id": "bankpilot_dev", "table_id": t,
+                       {"project": P, "dataset_id": "bankpilot_dev", "table_id": fq(t),
                         "member": RUNNER, "role": f"{bpc.ROLE_PREFIX}{role}", "condition": [],
                         "etag": "BwYx"}, ["no-op"]))
     variables = {k: {"value": v} for k, v in bpc.PILOT_VARIABLES.items()}
@@ -358,3 +363,234 @@ def test_cli_requires_owner_and_never_prints_it():
     assert "dataset owner not supplied" in missing.stdout
     other = cli("--mode", "pilot-recovery", "--dataset-owner=user:someone@example.invalid")
     assert other.returncode == 1
+
+
+# ---------------------------------------------------------------- M6T fully qualified table_id
+
+TM = 'module.bigquery.google_bigquery_table_iam_member.runner["{}"]'
+
+
+@pytest.mark.parametrize("table", sorted(bpc.READER_TABLES) + ["account_daily"])
+@pytest.mark.parametrize("form", ["fq", "bare"])
+def test_table_member_identity_forms_are_accepted(table, form):
+    p = recovery_plan()
+    _by(p, TM.format(table))["change"]["after"]["table_id"] = fq(table) if form == "fq" else table
+    r = check(p)
+    assert r["ok"], r["problems"]
+
+
+def _tm(table, **values):
+    return lambda p: _by(p, TM.format(table))["change"]["after"].update(values)
+
+
+TABLE_MEMBER_BAD = {
+    "other project path": _tm("accounts", table_id="projects/other-p/datasets/bankpilot_dev/"
+                                                    "tables/accounts"),
+    "other dataset path": _tm("accounts", table_id=f"projects/{P}/datasets/other/tables/accounts"),
+    "other table path": _tm("accounts", table_id=fq("customers")),
+    "other table bare": _tm("accounts", table_id="customers"),
+    "path suffix": _tm("accounts", table_id=fq("accounts") + "/x"),
+    "path prefix": _tm("accounts", table_id="//bigquery.googleapis.com/" + fq("accounts")),
+    "uppercase path": _tm("accounts", table_id=fq("accounts").upper()),
+    "missing table_id": lambda p: _by(p, TM.format("accounts"))["change"]["after"].pop(
+        "table_id"),
+    "other dataset_id": _tm("accounts", dataset_id="other"),
+    "reader widened to tables": _tm("accounts", role=f"{bpc.ROLE_PREFIX}tables"),
+    "reader widened to editor": _tm("customers", role="roles/bigquery.dataEditor"),
+    "writer table narrowed to readers": _tm("account_daily", role=f"{bpc.ROLE_PREFIX}readers"),
+    "conditional binding": _tm("curated_transactions", condition=[
+        {"expression": 'request.time < timestamp("2026-11-11T00:00:00Z")', "title": "t"}]),
+    "provisioner member": _tm("accounts", member=PROVISIONER),
+    "user member": _tm("accounts", member=OWNER),
+    "other project": _tm("accounts", project="other-p"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(TABLE_MEMBER_BAD))
+def test_table_member_identity_and_role_violations_are_rejected(name):
+    p = recovery_plan()
+    TABLE_MEMBER_BAD[name](p)
+    assert not check(p)["ok"], name
+
+
+# ---------------------------------------------------------------- M6T metadata drift
+
+PLAN_TS = "2026-11-12T09:00:00Z"
+OLD_MS, NEW_MS = 1793448000000, 1793451600000  # 2026-11-01T12:00Z -> +1 h; before PLAN_TS
+DATASET_ADDR = "module.bigquery.google_bigquery_dataset.foundation"
+BUCKET_ADDR = "module.storage.google_storage_bucket.artifacts"
+TABLE_ADDR = 'module.bigquery.google_bigquery_table.products["{}"]'
+
+
+def _bq_side(etag, ms, tags, **extra):
+    side = {"project": P, "dataset_id": "bankpilot_dev", "location": "europe-west2",
+            "labels": {"environment": "dev"}, "etag": etag, "last_modified_time": ms,
+            "resource_tags": tags}
+    side.update(extra)
+    return side
+
+
+def _drift_entry(addr, kind, name, before, after, index=None):
+    entry = {"address": addr, "mode": "managed", "type": kind, "name": name,
+             "change": {"actions": ["update"], "before": before, "after": after,
+                        "after_unknown": {}}}
+    if index is not None:
+        entry["index"] = index
+    return entry
+
+
+def dataset_drift():
+    return _drift_entry(DATASET_ADDR, "google_bigquery_dataset", "foundation",
+                        _bq_side("e1", OLD_MS, None, access=[{"role": "OWNER"}]),
+                        _bq_side("e2", NEW_MS, {}, access=[{"role": "OWNER"}]))
+
+
+def table_drift(t):
+    extra = {"table_id": t, "deletion_protection": True, "schema": '[{"name":"id"}]'}
+    return _drift_entry(TABLE_ADDR.format(t), "google_bigquery_table", "products",
+                        _bq_side("t1", OLD_MS, None, **extra),
+                        _bq_side("t2", NEW_MS, {}, **extra), index=t)
+
+
+def bucket_drift():
+    side = {"name": "b", "location": "EUROPE-WEST2", "public_access_prevention": "enforced",
+            "uniform_bucket_level_access": True, "versioning": [{"enabled": True}],
+            "labels": {"environment": "dev"}, "updated": "2026-11-01T12:00:00.123Z"}
+    return _drift_entry(BUCKET_ADDR, "google_storage_bucket", "artifacts", side,
+                        {**side, "updated": "2026-11-01T13:00:00.456Z"})
+
+
+def all_drift():
+    return [dataset_drift(), bucket_drift(), *(table_drift(t) for t in bpc.pilot_tables())]
+
+
+def drifted_plan(entries=None):
+    p = recovery_plan()
+    p["timestamp"] = PLAN_TS
+    p["resource_drift"] = all_drift() if entries is None else entries
+    return p
+
+
+def test_observed_nine_metadata_drift_entries_are_accepted():
+    r = check(drifted_plan())
+    assert r["ok"], r["problems"]
+    assert len(r["accepted_metadata_drift"]) == 9
+    assert r["creates"] == 1 and r["unchanged"] == 17
+    assert set(r["accepted_metadata_drift"]) == set(bpc.PILOT_METADATA_DRIFT)
+
+
+@pytest.mark.parametrize("entries", [[], [bucket_drift()], [dataset_drift()],
+                                     [table_drift("accounts")]])
+def test_subsets_of_metadata_drift_are_accepted(entries):
+    assert check(drifted_plan(entries))["ok"]
+
+
+def test_resource_tags_only_representation_change_is_accepted():
+    d = table_drift("accounts")
+    d["change"]["after"].update(etag="t1", last_modified_time=OLD_MS)  # only null -> {}
+    assert check(drifted_plan([d]))["ok"]
+
+
+def _d(addr, fn):
+    def apply(p):
+        fn(next(d for d in p["resource_drift"] if d["address"] == addr))
+    return apply
+
+
+def _after(addr, **values):
+    return _d(addr, lambda d: d["change"]["after"].update(values))
+
+
+TA = TABLE_ADDR.format("customers")
+DRIFT_BAD = {
+    # security-relevant changes hidden alongside metadata
+    "table schema changed": _after(TA, schema='[{"name":"id"},{"name":"pii"}]'),
+    "table protection off": _after(TA, deletion_protection=False),
+    "table labels changed": _after(TA, labels={"environment": "prod"}),
+    "dataset location": _after(DATASET_ADDR, location="US"),
+    "dataset access widened": _after(DATASET_ADDR, access=[{"role": "OWNER"},
+                                                           {"role": "READER",
+                                                            "special_group": "allUsers"}]),
+    "dataset labels": _after(DATASET_ADDR, labels={}),
+    "bucket public access": _after(BUCKET_ADDR, public_access_prevention="inherited"),
+    "bucket uniform access off": _after(BUCKET_ADDR, uniform_bucket_level_access=False),
+    "bucket versioning off": _after(BUCKET_ADDR, versioning=[{"enabled": False}]),
+    "bucket location": _after(BUCKET_ADDR, location="US"),
+    "bucket etag-like extra change": _after(BUCKET_ADDR, labels={"x": "y"}),
+    # metadata transitions outside the approved shapes
+    "resource_tags gains a tag": _after(TA, resource_tags={"tagKeys/1": "tagValues/2"}),
+    "resource_tags {} -> null": _d(TA, lambda d: (d["change"]["before"].update(resource_tags={}),
+                                                  d["change"]["after"].update(
+                                                      resource_tags=None))),
+    "last_modified_time backwards": _after(TA, last_modified_time=OLD_MS - 1),
+    "etag changed without timestamp": _after(TA, last_modified_time=OLD_MS),
+    "timestamp changed without etag": _after(TA, etag="t1"),
+    "last_modified_time string": _after(TA, last_modified_time=str(NEW_MS)),
+    "last_modified_time bool": _after(TA, last_modified_time=True),
+    "last_modified_time after plan": _after(TA, last_modified_time=NEW_MS + 10 ** 10),
+    "etag emptied": _after(DATASET_ADDR, etag=""),
+    "bucket updated backwards": _after(BUCKET_ADDR, updated="2026-11-01T11:00:00Z"),
+    "bucket updated in future": _after(BUCKET_ADDR, updated="2026-12-01T00:00:00Z"),
+    "bucket updated malformed": _after(BUCKET_ADDR, updated="yesterday"),
+    "bucket updated no zone": _after(BUCKET_ADDR, updated="2026-11-01T13:00:00"),
+    # shape, action and identity
+    "attribute added after": _after(TA, kms_key_name="k"),
+    "attribute missing after": _d(TA, lambda d: d["change"]["after"].pop("labels")),
+    "unknown values": _d(TA, lambda d: d["change"].update(after_unknown={"schema": True})),
+    "after null": _d(TA, lambda d: d["change"].update(after=None)),
+    "delete drift": _d(TA, lambda d: d["change"].update(actions=["delete"])),
+    "replace drift": _d(TA, lambda d: d["change"].update(actions=["delete", "create"])),
+    "create drift": _d(TA, lambda d: d["change"].update(actions=["create"])),
+    "no-op drift": _d(TA, lambda d: d["change"].update(actions=["no-op"])),
+    "wrong type": _d(TA, lambda d: d.update(type="google_bigquery_dataset")),
+    "data mode": _d(TA, lambda d: d.update(mode="data")),
+    "no actual change": _d(TA, lambda d: d["change"].update(after=d["change"]["before"])),
+    "duplicate entry": lambda p: p["resource_drift"].append(table_drift("customers")),
+    "drift on table member": lambda p: p["resource_drift"].append(_drift_entry(
+        TM.format("accounts"), "google_bigquery_table_iam_member", "runner",
+        {"etag": "a"}, {"etag": "b"}, index="accounts")),
+    "drift on bucket policy": lambda p: p["resource_drift"].append(_drift_entry(
+        "module.storage.google_storage_bucket_iam_policy.runner",
+        "google_storage_bucket_iam_policy", "runner", {"etag": "a"}, {"etag": "b"})),
+    "drift on dataset policy": lambda p: p["resource_drift"].append(_drift_entry(
+        DS, "google_bigquery_dataset_iam_policy", "metadata", {"etag": "a"}, {"etag": "b"})),
+    "drift on unknown table": lambda p: p["resource_drift"].append(
+        {**table_drift("customers"), "address": TABLE_ADDR.format("secret_table")}),
+    "plan timestamp missing": lambda p: p.pop("timestamp"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(DRIFT_BAD))
+def test_adversarial_metadata_drift_is_rejected(name):
+    p = drifted_plan()
+    DRIFT_BAD[name](p)
+    r = check(p)
+    assert not r["ok"], name
+
+
+def test_metadata_drift_is_pilot_recovery_only():
+    full = drifted_plan()
+    for rc in full["resource_changes"]:
+        rc["change"]["actions"] = ["create"]
+    assert check(full, mode="pilot")["problems"][0].startswith("drift detected outside Terraform")
+    for mode in bpc.BOOTSTRAP_MODES:
+        assert not bpc.check_plan(drifted_plan(), mode)["ok"], mode
+    assert bpc.ETAG_DRIFT_BY_MODE.keys() == {"access", "revoke"}
+    assert not set(bpc.PILOT_METADATA_DRIFT) & set().union(*bpc.ETAG_DRIFT_BY_MODE.values())
+
+
+def test_metadata_drift_helper_messages():
+    planned = bpc._parse_utc(PLAN_TS)
+    assert bpc.pilot_metadata_drift_problems(table_drift("accounts"), planned) == []
+    d = table_drift("accounts")
+    d["change"]["after"]["deletion_protection"] = False
+    assert bpc.pilot_metadata_drift_problems(d, planned) == [
+        f"{TABLE_ADDR.format('accounts')}: drift changes non-metadata attributes: "
+        "['deletion_protection']"]
+    assert bpc.pilot_metadata_drift_problems(bucket_drift(), None) == [
+        f"{BUCKET_ADDR}: updated is later than the plan timestamp"]
+
+
+@pytest.mark.parametrize("value", [True, False, 0, -1, 1.5, "1793451600000", None])
+def test_epoch_ms_rejects_non_integer_or_non_positive(value):
+    assert bpc._epoch_ms(value) is None

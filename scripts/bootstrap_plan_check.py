@@ -484,7 +484,16 @@ def _check_pilot_values(rc: dict, problems: list[str], owner: object = None) -> 
         if after.get("deletion_protection") is not True or after.get("dataset_id") != dataset:
             problems.append(f"{addr}: table must be deletion-protected in {dataset}")
     elif kind == "google_bigquery_table_iam_member":
-        table = after.get("table_id")
+        # M6T: the table comes from the instance key; table_id must be that table, either as
+        # configured (bare id, on create) or as the provider's refreshed fully qualified path.
+        key = re.fullmatch(r'module\.bigquery\.google_bigquery_table_iam_member\.runner'
+                           r'\["([a-z_]+)"\]', addr)
+        table = key.group(1) if key else None
+        approved_ids = {table, f"projects/{PROJECT}/datasets/{dataset}/tables/{table}"}
+        if table not in pilot_tables() or after.get("table_id") not in approved_ids:
+            problems.append(f"{addr}: table_id is not the approved table")
+        if after.get("dataset_id") not in (None, dataset):
+            problems.append(f"{addr}: table member is not in {dataset}")
         role = f"{ROLE_PREFIX}{'readers' if table in READER_TABLES else 'tables'}"
         if after.get("member") != f"serviceAccount:{RUNNER_EMAIL}" or \
                 after.get("role") != role or after.get("condition"):
@@ -505,6 +514,95 @@ def pilot_addresses() -> set[str]:
     }
 
 
+# M6T: refresh-only metadata churn observed on the 17 resources created by the partial apply.
+# address -> (type, attributes allowed to differ). Nothing else may differ; see below.
+_TABLE_METADATA = frozenset({"etag", "last_modified_time", "resource_tags"})
+PILOT_METADATA_DRIFT = {
+    "module.bigquery.google_bigquery_dataset.foundation":
+        ("google_bigquery_dataset", _TABLE_METADATA),
+    "module.storage.google_storage_bucket.artifacts":
+        ("google_storage_bucket", frozenset({"updated"})),
+    **{f'module.bigquery.google_bigquery_table.products["{t}"]':
+       ("google_bigquery_table", _TABLE_METADATA) for t in pilot_tables()},
+}
+CLOCK_SKEW = timedelta(minutes=5)
+
+
+def _epoch_ms(value: object) -> datetime | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return datetime.fromtimestamp(value / 1000, UTC)
+
+
+def _rfc3339(value: object) -> datetime | None:
+    if not isinstance(value, str) or not re.fullmatch(
+            r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})", value):
+        return None
+    return _parse_utc(value)
+
+
+def _timestamp_moved_forward(name: str, before: object, after: object,
+                             planned: datetime | None, parse) -> str | None:
+    old, new = parse(before), parse(after)
+    if old is None or new is None:
+        return f"{name} is not a valid timestamp"
+    if not old < new:
+        return f"{name} did not move forward"
+    if planned is None or new > planned + CLOCK_SKEW:
+        return f"{name} is later than the plan timestamp"
+    return None
+
+
+def pilot_metadata_drift_problems(rc: dict, planned: datetime | None) -> list[str]:
+    """M6T pilot-recovery only: accept refresh metadata churn on an existing pilot resource.
+
+    Exact managed address/type, no index other than the table key, action exactly
+    ``update``, identical attribute sets, no unknown values, and only these differences:
+    BigQuery dataset/table ``etag`` (non-empty strings), ``last_modified_time`` (epoch ms,
+    strictly increasing, not after the plan timestamp + 5 min) and ``resource_tags``
+    (exactly null -> {}), with etag and last_modified_time changing together; bucket
+    ``updated`` (RFC 3339, strictly increasing, same bound).
+    Every other attribute (schema, labels, location, protection, access, IAM, ...) must be
+    identical, so a security-relevant change cannot ride along with the metadata.
+    """
+    addr = rc.get("address")
+    kind, allowed = PILOT_METADATA_DRIFT[addr]
+    change = rc.get("change") or {}
+    before, after = change.get("before"), change.get("after")
+    if rc.get("mode", "managed") != "managed" or rc.get("type") != kind:
+        return [f"drift detected outside Terraform: {addr}"]
+    if change.get("actions") != ["update"]:
+        return [f"drift detected outside Terraform: {addr} {change.get('actions')}"]
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        return [f"{addr}: drift lacks before/after values"]
+    if set(before) != set(after):
+        return [f"{addr}: drift attribute sets differ"]
+    if _has_unknown(change.get("after_unknown")):
+        return [f"{addr}: drift has unknown values"]
+    changed = {k for k in before if before[k] != after[k]}
+    problems = []
+    if not changed:
+        problems.append(f"{addr}: drift without a change")
+    if changed - allowed:
+        problems.append(f"{addr}: drift changes non-metadata attributes: "
+                        f"{sorted(changed - allowed)}")
+    if "etag" in changed and not all(isinstance(after_or_before, str) and after_or_before
+                                     for after_or_before in (before["etag"], after["etag"])):
+        problems.append(f"{addr}: etag is not a non-empty string")
+    if ("etag" in changed) != ("last_modified_time" in changed):
+        # A BigQuery modification changes both; one without the other is unverified.
+        problems.append(f"{addr}: etag and last_modified_time must change together")
+    if "resource_tags" in changed and not (before["resource_tags"] is None
+                                           and after["resource_tags"] == {}):
+        problems.append(f"{addr}: resource_tags change is not null -> {{}}")
+    for name, parse in (("last_modified_time", _epoch_ms), ("updated", _rfc3339)):
+        if name in changed:
+            issue = _timestamp_moved_forward(name, before[name], after[name], planned, parse)
+            if issue:
+                problems.append(f"{addr}: {issue}")
+    return problems
+
+
 def _check_pilot(plan: dict, mode: str = "pilot", owner: object = None) -> dict:
     """``pilot``: 18 creates. ``pilot-recovery`` (M6T): after the partial apply, the 17
     created resources are unchanged and the only change is one create of the dataset policy."""
@@ -515,8 +613,19 @@ def _check_pilot(plan: dict, mode: str = "pilot", owner: object = None) -> dict:
         problems.append("variable bucket_name is missing")
     if (variables.get("dataset_owner_member") or {}).get("value") != owner:
         problems.append("variable dataset_owner_member is not the approved dataset owner")
+    accepted_metadata_drift: list[str] = []
+    seen: set[str] = set()
+    planned = _parse_utc(plan.get("timestamp"))
     for rc in plan.get("resource_drift") or []:
-        problems.append(f"drift detected outside Terraform: {rc.get('address')}")
+        addr = rc.get("address")
+        if mode == "pilot-recovery" and addr in PILOT_METADATA_DRIFT and addr not in seen:
+            seen.add(addr)
+            drift_problems = pilot_metadata_drift_problems(rc, planned)
+            problems.extend(drift_problems)
+            if not drift_problems:
+                accepted_metadata_drift.append(addr)
+        else:
+            problems.append(f"drift detected outside Terraform: {addr}")
     report = _classify(plan, problems, lambda rc: _check_pilot_values(rc, problems, owner))
     if mode == "pilot":
         _compare(report, pilot_addresses(), set(), set(), problems)
@@ -526,6 +635,8 @@ def _check_pilot(plan: dict, mode: str = "pilot", owner: object = None) -> dict:
     # prior_state legitimately holds the identity module's project-policy data source (the
     # Owner binding), so the pilot scan covers everything the plan would change or configure.
     _forbid(plan, PILOT_FORBIDDEN, problems, PILOT_SCAN_KEYS)
+    if mode == "pilot-recovery":
+        report["accepted_metadata_drift"] = sorted(accepted_metadata_drift)
     report.update(mode=mode, dataset_owner_approved=not dataset_owner_problems(owner),
                   problems=problems, ok=not problems)
     return report
