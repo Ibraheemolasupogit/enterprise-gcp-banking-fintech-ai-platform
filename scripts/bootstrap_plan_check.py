@@ -213,6 +213,92 @@ def _access_context(plan: dict, variables: dict, problems: list[str]) -> dict:
             "window_hours": None if window is None else round(window.total_seconds() / 3600, 2)}
 
 
+RUNNER_GRANT = "google_project_iam_member.runner_jobs"
+RUNNER_GRANT_KEYS = frozenset({"condition", "etag", "id", "member", "project", "role"})
+AUDIT_CONFIG_KEYS = frozenset({"audit_log_config", "etag", "id", "project", "service"})
+AUDIT_LOG_CONFIG_KEYS = frozenset({"exempted_members", "log_type"})
+
+
+def _has_unknown(value: object) -> bool:
+    """True if any leaf of a Terraform ``after_unknown`` structure is ``true``."""
+    if isinstance(value, dict):
+        return any(_has_unknown(v) for v in value.values())
+    if isinstance(value, list):
+        return any(_has_unknown(v) for v in value)
+    return value is True
+
+
+def _runner_values_ok(side: dict) -> bool:
+    return (side.get("role") == f"{ROLE_PREFIX}jobs"
+            and side.get("member") == f"serviceAccount:{RUNNER_EMAIL}"
+            and side.get("project") == PROJECT and not side.get("condition")
+            and bool(side.get("id")))
+
+
+def _audit_values_ok(side: dict) -> bool:
+    configs = side.get("audit_log_config")
+    if not isinstance(configs, list) or not all(
+            isinstance(c, dict) and set(c) == AUDIT_LOG_CONFIG_KEYS for c in configs):
+        return False
+    return (side.get("service") == AUDIT_SERVICE and side.get("project") == PROJECT
+            and bool(side.get("id"))
+            and sorted(c["log_type"] for c in configs) == sorted(AUDIT_LOG_TYPES)
+            and all(c["exempted_members"] in ([], None) for c in configs))
+
+
+# address -> (type, name, index, exact attribute set, approved-values predicate, label)
+ETAG_DRIFT_SPECS = {
+    RUNNER_GRANT: ("google_project_iam_member", "runner_jobs", None, RUNNER_GRANT_KEYS,
+                   _runner_values_ok, "the approved runner grant"),
+    AUDIT_ADDRESS: ("google_project_iam_audit_config", "iamcredentials", 0, AUDIT_CONFIG_KEYS,
+                    _audit_values_ok, "the approved iam.googleapis.com audit config"),
+}
+# Which etag-only drift each mode tolerates. Every other mode tolerates none.
+ETAG_DRIFT_BY_MODE = {"access": frozenset({RUNNER_GRANT}),
+                      "revoke": frozenset({RUNNER_GRANT, AUDIT_ADDRESS})}
+
+
+def etag_drift_problems(rc: dict, address: str) -> list[str]:
+    """M6S exceptions: refresh reports ``etag`` changed on a project-policy-backed resource
+    because the project IAM policy (whose etag these resources store) was rewritten by
+    another change. Accepted only if it is exactly an ``update`` of ``address`` in which every
+    attribute other than ``etag`` is present, identical before and after, and equal to the
+    approved configuration, and both etags are known, non-empty and different.
+    """
+    kind, name, index, keys, values_ok, label = ETAG_DRIFT_SPECS[address]
+    addr = rc.get("address")
+    change = rc.get("change") or {}
+    before, after = change.get("before"), change.get("after")
+    if (addr != address or rc.get("mode", "managed") != "managed"
+            or rc.get("type") != kind or rc.get("name") != name
+            or rc.get("index") != index):
+        return [f"drift detected outside Terraform: {addr}"]
+    if change.get("actions") != ["update"]:
+        return [f"drift detected outside Terraform: {addr} {change.get('actions')}"]
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        return [f"{addr}: drift lacks before/after values"]
+    problems = []
+    if set(before) != keys or set(after) != keys:
+        problems.append(f"{addr}: drift attributes are not exactly {sorted(keys)}")
+    changed = sorted(k for k in set(before) | set(after)
+                     if k != "etag" and before.get(k) != after.get(k))
+    if changed:
+        problems.append(f"{addr}: drift changes more than etag: {changed}")
+    if _has_unknown(change.get("after_unknown")):
+        problems.append(f"{addr}: drift has unknown values")
+    if not (values_ok(before) and values_ok(after)):
+        problems.append(f"{addr}: drift values are not {label}")
+    etags = (before.get("etag"), after.get("etag"))
+    if not all(isinstance(e, str) and e for e in etags) or etags[0] == etags[1]:
+        problems.append(f"{addr}: drift is not an etag change")
+    return problems
+
+
+def runner_etag_drift_problems(rc: dict) -> list[str]:
+    """The access-mode exception (runner grant only); see ``etag_drift_problems``."""
+    return etag_drift_problems(rc, RUNNER_GRANT)
+
+
 def _check_bootstrap(plan: dict, mode: str, iam: Path) -> dict:
     roles, durable = expected_roles(iam), durable_addresses(iam)
     existing = durable | {AUDIT_ADDRESS}
@@ -232,10 +318,22 @@ def _check_bootstrap(plan: dict, mode: str, iam: Path) -> dict:
     elif "access_expiry" not in variables or variables["access_expiry"].get("value") is not None:
         problems.append("variable access_expiry must be null while access is disabled")
     already_removed: set[str] = set()
+    etag_drift: list[str] = []
+    seen: set[str] = set()  # each tolerated address at most once; duplicates are rejected
+    tolerated = ETAG_DRIFT_BY_MODE.get(mode, frozenset())
     for rc in plan.get("resource_drift") or []:
         addr, actions = rc.get("address"), (rc.get("change") or {}).get("actions")
-        if mode == "revoke" and addr in ACCESS_ADDRESSES and actions == ["delete"]:
+        if addr in seen:
+            problems.append(f"drift detected outside Terraform: {addr} (duplicate)")
+        elif mode == "revoke" and addr in ACCESS_ADDRESSES and actions == ["delete"]:
+            seen.add(addr)
             already_removed.add(addr)
+        elif addr in tolerated:
+            seen.add(addr)
+            drift_problems = etag_drift_problems(rc, addr)
+            problems.extend(drift_problems)
+            if not drift_problems:
+                etag_drift.append(addr)
         else:
             problems.append(f"drift detected outside Terraform: {addr}")
     want_delete = want_delete - already_removed  # never mutate the module constants
@@ -244,9 +342,11 @@ def _check_bootstrap(plan: dict, mode: str, iam: Path) -> dict:
     _forbid(plan, FORBIDDEN_TEXT, problems)
     report.update(mode=mode, problems=problems, ok=not problems)
     if mode == "access":
-        report.update(access_expiry=ctx.get("expiry"), window_hours=ctx.get("window_hours"))
+        report.update(access_expiry=ctx.get("expiry"), window_hours=ctx.get("window_hours"),
+                      accepted_etag_drift=etag_drift)
     if mode == "revoke":
-        report["already_removed"] = sorted(already_removed)
+        report.update(already_removed=sorted(already_removed),
+                      accepted_etag_drift=sorted(etag_drift))
     return report
 
 

@@ -405,3 +405,295 @@ def test_cli_accepts_new_modes():
                          input=json.dumps(access_plan()), capture_output=True, text=True,
                          check=False)
     assert bad.returncode == 1
+
+
+# ---------------------------------------------------------------- M6S runner etag drift
+
+RUNNER_ID = f"{P}/{bpc.ROLE_PREFIX}jobs/{RUNNER}"
+
+
+def _runner_side(etag):
+    return {"condition": [], "etag": etag, "id": RUNNER_ID, "member": RUNNER, "project": P,
+            "role": f"{bpc.ROLE_PREFIX}jobs"}
+
+
+def _etag_drift():
+    return {"address": bpc.RUNNER_GRANT, "mode": "managed",
+            "type": "google_project_iam_member", "name": "runner_jobs",
+            "provider_name": "registry.terraform.io/hashicorp/google",
+            "change": {"actions": ["update"], "before": _runner_side("BwYOldEtag0="),
+                       "after": _runner_side("BwYNewEtag1="), "after_unknown": {},
+                       "before_sensitive": {"condition": []},
+                       "after_sensitive": {"condition": []}}}
+
+
+def access_plan_with_etag_drift():
+    p = access_plan()
+    p["resource_drift"] = [_etag_drift()]
+    return p
+
+
+def test_access_accepts_exact_runner_etag_only_drift():
+    r = bpc.check_plan(access_plan_with_etag_drift(), "access")
+    assert r["ok"], r["problems"]
+    assert r["accepted_etag_drift"] == [bpc.RUNNER_GRANT]
+    assert r["creates"] == 2 and r["unchanged"] == 11
+    assert bpc.check_plan(access_plan(), "access")["accepted_etag_drift"] == []
+
+
+def _drift(fn):
+    def apply(p):
+        fn(p["resource_drift"][0])
+    return apply
+
+
+def _both(key, value):
+    def f(d):
+        d["change"]["before"][key] = value
+        d["change"]["after"][key] = value
+    return f
+
+
+ETAG_BAD = {
+    "role changed after": _drift(lambda d: d["change"]["after"].update(
+        role=f"{bpc.ROLE_PREFIX}provision")),
+    "member changed after": _drift(lambda d: d["change"]["after"].update(
+        member=f"serviceAccount:{bpc.PROVISIONER_EMAIL}")),
+    "project changed after": _drift(lambda d: d["change"]["after"].update(project="other-p")),
+    "condition added after": _drift(lambda d: d["change"]["after"].update(
+        condition=[bpc.expiry_condition(EXPIRY)])),
+    "id changed after": _drift(lambda d: d["change"]["after"].update(id="x")),
+    "both sides wrong role": _drift(_both("role", f"{bpc.ROLE_PREFIX}objects")),
+    "both sides wrong member": _drift(_both("member", "user:someone@example.invalid")),
+    "both sides conditional": _drift(_both("condition", [bpc.expiry_condition(EXPIRY)])),
+    "both sides empty id": _drift(_both("id", "")),
+    "etag unchanged": _drift(lambda d: d["change"]["after"].update(etag="BwYOldEtag0=")),
+    "etag missing after": _drift(lambda d: d["change"]["after"].pop("etag")),
+    "etag empty before": _drift(lambda d: d["change"]["before"].update(etag="")),
+    "member missing both": _drift(lambda d: [d["change"][s].pop("member")
+                                             for s in ("before", "after")]),
+    "extra attribute": _drift(_both("extra", "x")),
+    "after null": _drift(lambda d: d["change"].update(after=None)),
+    "unknown after values": _drift(lambda d: d["change"].update(after_unknown={"etag": True})),
+    "delete drift": _drift(lambda d: d["change"].update(actions=["delete"])),
+    "replace drift": _drift(lambda d: d["change"].update(actions=["delete", "create"])),
+    "no-op labelled drift": _drift(lambda d: d["change"].update(actions=["no-op"])),
+    "indexed address": _drift(lambda d: d.update(index=0)),
+    "data mode": _drift(lambda d: d.update(mode="data")),
+    "wrong type": _drift(lambda d: d.update(type="google_project_iam_binding")),
+    "different resource etag drift": _drift(lambda d: d.update(
+        address="google_project_iam_audit_config.iamcredentials[0]")),
+    "second identical entry": lambda p: p["resource_drift"].append(_etag_drift()),
+    "extra drift on role": lambda p: p["resource_drift"].append({
+        "address": "google_project_iam_custom_role.provision",
+        "change": {"actions": ["update"]}}),
+    "runner grant not no-op in changes": lambda p: _by(p, bpc.RUNNER_GRANT)["change"].update(
+        actions=["update"]),
+    "role permissions changed": lambda p: _by(p, "google_project_iam_custom_role.provision")[
+        "change"]["after"].update(permissions=["resourcemanager.projects.setIamPolicy"]),
+}
+
+
+@pytest.mark.parametrize("name", sorted(ETAG_BAD))
+def test_adversarial_runner_drift_is_rejected(name):
+    p = access_plan_with_etag_drift()
+    ETAG_BAD[name](p)
+    r = bpc.check_plan(p, "access")
+    assert not r["ok"], name
+    assert r["accepted_etag_drift"] in ([], [bpc.RUNNER_GRANT])
+
+
+@pytest.mark.parametrize("mode", ["initial", "recovery"])
+def test_etag_exception_is_not_available_in_initial_or_recovery(mode):
+    p = revoke_plan()
+    p["resource_changes"] = p["resource_changes"][:-2]
+    p["resource_drift"] = [_etag_drift()]
+    assert "drift detected outside Terraform: google_project_iam_member.runner_jobs" in \
+        bpc.check_plan(p, mode)["problems"]
+
+
+def test_access_adversarial_cases_still_fail_with_etag_drift_present():
+    for name, mutate in ACCESS_BAD.items():
+        p = access_plan_with_etag_drift()
+        mutate(p)
+        assert not bpc.check_plan(p, "access")["ok"], name
+
+
+def test_etag_drift_helper_layers_directly():
+    assert bpc.runner_etag_drift_problems(_etag_drift()) == []
+    other = _etag_drift()
+    other["address"] = "google_project_iam_member.provisioner[0]"
+    assert bpc.runner_etag_drift_problems(other) == [
+        "drift detected outside Terraform: google_project_iam_member.provisioner[0]"]
+    for key, value in (("member", "user:someone@example.invalid"),
+                       ("role", f"{bpc.ROLE_PREFIX}objects")):
+        moved = _etag_drift()
+        moved["change"]["after"][key] = value
+        assert (f"{bpc.RUNNER_GRANT}: drift changes more than etag: ['{key}']"
+                in bpc.runner_etag_drift_problems(moved))
+
+
+# ---------------------------------------------------------------- M6S revoke etag drift
+
+AUDIT_ID = f"projects/{P}/audit_config/iam.googleapis.com"
+
+
+def _audit_side(etag):
+    return {"audit_log_config": [{"exempted_members": [], "log_type": "ADMIN_READ"},
+                                 {"exempted_members": [], "log_type": "DATA_READ"}],
+            "etag": etag, "id": AUDIT_ID, "project": P, "service": "iam.googleapis.com"}
+
+
+def _audit_drift():
+    return {"address": bpc.AUDIT_ADDRESS, "mode": "managed",
+            "type": "google_project_iam_audit_config", "name": "iamcredentials", "index": 0,
+            "provider_name": "registry.terraform.io/hashicorp/google",
+            "change": {"actions": ["update"], "before": _audit_side("BwYAccessEtag="),
+                       "after": _audit_side("BwYRevokeEtag="),
+                       "after_unknown": {"audit_log_config": [{"exempted_members": []},
+                                                              {"exempted_members": []}]}}}
+
+
+def revoke_plan_with_drift(*entries):
+    p = revoke_plan()
+    p["resource_drift"] = [e() for e in entries]
+    return p
+
+
+@pytest.mark.parametrize("entries", [
+    (), (_etag_drift,), (_audit_drift,), (_etag_drift, _audit_drift),
+    (_audit_drift, _etag_drift)])
+def test_revoke_accepts_exact_etag_only_drift(entries):
+    r = bpc.check_plan(revoke_plan_with_drift(*entries), "revoke")
+    assert r["ok"], r["problems"]
+    assert r["deletes"] == 2 and r["unchanged"] == 11 and r["creates"] == 0
+    assert r["accepted_etag_drift"] == sorted(e()["address"] for e in entries)
+
+
+def test_revoke_after_emergency_removal_with_policy_etag_drift():
+    p = revoke_plan_with_drift(_etag_drift, _audit_drift)
+    p["resource_changes"] = p["resource_changes"][:-2]
+    p["resource_drift"] += [{"address": a, "change": {"actions": ["delete"]}}
+                            for a in sorted(bpc.ACCESS_ADDRESSES)]
+    r = bpc.check_plan(p, "revoke")
+    assert r["ok"], r["problems"]
+    assert r["already_removed"] == sorted(bpc.ACCESS_ADDRESSES) and r["deletes"] == 0
+
+
+def _a(fn):
+    def apply(p):
+        fn(next(d for d in p["resource_drift"] if d["address"] == bpc.AUDIT_ADDRESS))
+    return apply
+
+
+def _a_both(fn):
+    def f(d):
+        fn(d["change"]["before"])
+        fn(d["change"]["after"])
+    return _a(f)
+
+
+AUDIT_BAD = {
+    "service changed after": _a(lambda d: d["change"]["after"].update(service="allServices")),
+    "service other on both": _a_both(lambda s: s.update(service="storage.googleapis.com")),
+    "DATA_WRITE added after": _a(lambda d: d["change"]["after"]["audit_log_config"].append(
+        {"exempted_members": [], "log_type": "DATA_WRITE"})),
+    "DATA_READ removed on both": _a_both(lambda s: s["audit_log_config"].pop()),
+    "exemption added after": _a(lambda d: d["change"]["after"]["audit_log_config"][1].update(
+        exempted_members=["user:x@example.invalid"])),
+    "exemption on both": _a_both(lambda s: s["audit_log_config"][0].update(
+        exempted_members=["serviceAccount:x@example.invalid"])),
+    "exempted_members missing": _a_both(lambda s: s["audit_log_config"][0].pop(
+        "exempted_members")),
+    "extra key in log config": _a_both(lambda s: s["audit_log_config"][0].update(x=1)),
+    "log config not a list": _a_both(lambda s: s.update(audit_log_config={"a": 1})),
+    "project changed after": _a(lambda d: d["change"]["after"].update(project="other-p")),
+    "id changed after": _a(lambda d: d["change"]["after"].update(id="x")),
+    "id empty on both": _a_both(lambda s: s.update(id="")),
+    "extra attribute": _a_both(lambda s: s.update(extra="x")),
+    "service missing": _a_both(lambda s: s.pop("service")),
+    "etag unchanged": _a(lambda d: d["change"]["after"].update(etag="BwYAccessEtag=")),
+    "etag missing before": _a(lambda d: d["change"]["before"].pop("etag")),
+    "etag not a string": _a(lambda d: d["change"]["after"].update(etag=7)),
+    "before null": _a(lambda d: d["change"].update(before=None)),
+    "nested unknown": _a(lambda d: d["change"].update(
+        after_unknown={"audit_log_config": [{"exempted_members": True}]})),
+    "delete action": _a(lambda d: d["change"].update(actions=["delete"])),
+    "replace action": _a(lambda d: d["change"].update(actions=["delete", "create"])),
+    "create action": _a(lambda d: d["change"].update(actions=["create"])),
+    "index missing": _a(lambda d: d.pop("index")),
+    "index 1": _a(lambda d: d.update(index=1)),
+    "wrong name": _a(lambda d: d.update(name="other")),
+    "wrong type": _a(lambda d: d.update(type="google_project_iam_policy")),
+    "data mode": _a(lambda d: d.update(mode="data")),
+    "duplicate audit drift": lambda p: p["resource_drift"].append(_audit_drift()),
+    "duplicate runner drift": lambda p: p["resource_drift"].append(_etag_drift()),
+    "runner member changed": lambda p: p["resource_drift"][0]["change"]["after"].update(
+        member=f"serviceAccount:{bpc.PROVISIONER_EMAIL}"),
+    "runner conditional on both": lambda p: [p["resource_drift"][0]["change"][s].update(
+        condition=[bpc.expiry_condition(EXPIRY)]) for s in ("before", "after")],
+    "provisioner grant etag drift": lambda p: p["resource_drift"].append(
+        {**_etag_drift(), "address": bpc.PROVISIONER_GRANT, "name": "provisioner", "index": 0}),
+    "impersonation grant update drift": lambda p: p["resource_drift"].append(
+        {"address": bpc.IMPERSONATION_GRANT, "change": {"actions": ["update"]}}),
+    "role drift": lambda p: p["resource_drift"].append(
+        {"address": "google_project_iam_custom_role.provision",
+         "change": {"actions": ["update"]}}),
+    "audit config deleted in changes": lambda p: _by(p, bpc.AUDIT_ADDRESS)["change"].update(
+        actions=["delete"]),
+    "runner deleted in changes": lambda p: _by(p, bpc.RUNNER_GRANT)["change"].update(
+        actions=["delete"]),
+    "access re-enabled": lambda p: p["variables"]["provisioner_access_enabled"].update(
+        value=True),
+}
+
+
+@pytest.mark.parametrize("name", sorted(AUDIT_BAD))
+def test_adversarial_revoke_drift_is_rejected(name):
+    p = revoke_plan_with_drift(_etag_drift, _audit_drift)
+    AUDIT_BAD[name](p)
+    r = bpc.check_plan(p, "revoke")
+    assert not r["ok"], name
+
+
+def test_revoke_adversarial_cases_still_fail_with_etag_drift_present():
+    for name, mutate in REVOKE_BAD.items():
+        p = revoke_plan_with_drift(_etag_drift, _audit_drift)
+        mutate(p)
+        assert not bpc.check_plan(p, "revoke")["ok"], name
+
+
+def test_access_mode_still_rejects_audit_etag_drift():
+    p = access_plan_with_etag_drift()
+    p["resource_drift"].append(_audit_drift())
+    r = bpc.check_plan(p, "access")
+    assert f"drift detected outside Terraform: {bpc.AUDIT_ADDRESS}" in r["problems"]
+    assert r["accepted_etag_drift"] == [bpc.RUNNER_GRANT]
+
+
+def test_audit_drift_helper_layers_directly():
+    assert bpc.etag_drift_problems(_audit_drift(), bpc.AUDIT_ADDRESS) == []
+    d = _audit_drift()
+    d["change"]["after"]["service"] = "allServices"
+    assert (f"{bpc.AUDIT_ADDRESS}: drift changes more than etag: ['service']"
+            in bpc.etag_drift_problems(d, bpc.AUDIT_ADDRESS))
+    d = _audit_drift()
+    for side in ("before", "after"):
+        d["change"][side]["audit_log_config"][0]["exempted_members"] = ["user:x@e.invalid"]
+    assert bpc.etag_drift_problems(d, bpc.AUDIT_ADDRESS) == [
+        f"{bpc.AUDIT_ADDRESS}: drift values are not the approved iam.googleapis.com audit config"]
+    assert bpc.etag_drift_problems(_etag_drift(), bpc.AUDIT_ADDRESS) == [
+        f"drift detected outside Terraform: {bpc.RUNNER_GRANT}"]
+    assert not bpc._has_unknown({"a": [{"b": []}, {"c": False}]})
+    assert bpc._has_unknown({"a": [{"b": [False, True]}]})
+
+
+def test_both_sides_are_checked_against_approved_values():
+    for build, addr, key, bad in ((_audit_drift, bpc.AUDIT_ADDRESS, "service", "allServices"),
+                                  (_etag_drift, bpc.RUNNER_GRANT, "member",
+                                   "user:x@example.invalid")):
+        d = build()
+        d["change"]["before"][key] = bad  # only the stored side is wrong
+        problems = bpc.etag_drift_problems(d, addr)
+        assert f"{addr}: drift changes more than etag: ['{key}']" in problems
+        assert any(p.startswith(f"{addr}: drift values are not") for p in problems)

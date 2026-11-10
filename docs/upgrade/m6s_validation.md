@@ -144,6 +144,8 @@ If no entry appears within about 15 minutes, record a finding, complete revocati
    - the provisioner account's policy is empty;
    - a token mint attempt for the provisioner fails with `PERMISSION_DENIED`, and is logged.
 
+`--mode revoke` tolerates only the bounded etag-only drift described in [Revocation readiness](#revocation-readiness-etag-drift-and-partial-failure), and its report lists it as `accepted_etag_drift`.
+
 **The expiry is the hard stop.** IAM evaluates `request.time` on every call, so both grants stop working at `EXP` even if revocation is late. Revocation removes the dormant bindings so the live policy matches the baseline.
 
 ### F. Failure handling
@@ -154,7 +156,7 @@ If no entry appears within about 15 minutes, record a finding, complete revocati
 | Pilot plan `403` on token minting or a permission error | Retry once after 5 min (propagation). If it fails again: stop, revoke, record the missing permission (P2/P6). **Never** widen roles inside the window |
 | Identity postcondition fails | Stop and revoke. The provisioner's project bindings differ from expectations |
 | Pilot apply fails part-way | Back up whatever state exists. Do not retry blindly. Check the dataset access for a leftover creator OWNER entry. Revoke on schedule; repair under a new window |
-| Bootstrap grant apply fails part-way | Back up, then revoke with `--mode revoke` (an absent grant shows as an extra delete-missing problem: review it manually) |
+| Bootstrap grant apply fails part-way | Back up, then revoke. See [partial failure](#revocation-under-partial-failure): the checker stays strict, and a missing grant is handled by the documented manual review |
 | Window about to expire mid-task | Stop. Let it expire, revoke, and plan a new window. Never extend an approved plan |
 | Suspected misuse, or Terraform unavailable | **Emergency:** in the Console, remove both conditional bindings. If needed, also disable `bankpilot-dev-provisioner`; re-enabling it later shows as an `update` that `revoke` rejects, so review it manually. Then run the Terraform revoke: the checker accepts exactly those two as `already_removed` |
 | Budget alert fires | Stop work, revoke, and investigate the bill. Alerts are **notifications, not a spending cap**, and arrive with billing-data delay (hours) |
@@ -193,6 +195,165 @@ All of these are operator gates. None is contradicted by the repository or tests
 3. **Dataset creator access:** the authoritative dataset policy removes the creator OWNER entry only if that apply succeeds (step C5 check).
 4. **The Owner is unrestricted (P8):** a compromised Owner session bypasses every gate here.
 5. **Text checks:** the provider check is regex-based, and the checker's forbidden-text scan is a substring scan. Plan review remains the authoritative gate.
+
+## Finding: runner grant etag drift in the access plan
+
+**Observed (operator):** the approved bootstrap access plan was rejected by `--mode access`. `resource_drift` held exactly one entry: `google_project_iam_member.runner_jobs`, `actions = ["update"]`, with **only `etag`** changed. Independent inspection confirmed that the role and member are unchanged and match the approved runner binding. No apply was performed on that plan.
+
+**Cause (hypothesis, consistent with the evidence):**
+- `google_project_iam_member` stores the *project policy* etag at the time it was written, not an etag of its own;
+- the M6Q recovery apply rewrote the project policy to add the `iam.googleapis.com` auditConfig, which changed the policy etag;
+- refreshing `runner_jobs` therefore reports a new etag although its binding is unchanged.
+
+The checker rejected it correctly as unknown drift. It is benign only if nothing but the etag moved.
+
+**Exception (access mode only, one entry, fully bounded):** `runner_etag_drift_problems()` accepts a drift entry only if all of the following hold:
+- **Identity of the entry:** the address is exactly `google_project_iam_member.runner_jobs`, managed, with that type and name and no index, and the actions are exactly `["update"]`.
+- **Shape:** `before` and `after` are both objects with exactly the attributes `condition`, `etag`, `id`, `member`, `project` and `role`. Missing or extra attributes are rejected.
+- **What changed:** every attribute except `etag` is identical before and after. Both etags are non-empty and differ. There are no unknown values.
+- **Values on both sides:** they equal the approved grant: role `bankpilot_dev_jobs`, member `serviceAccount:bankpilot-dev-runner@…`, this project, no condition and a non-empty `id`.
+- **At most one such entry:** a duplicate is rejected, and so is drift on any other address.
+
+All other access checks still apply unchanged. `runner_jobs` must still be `no-op` in `resource_changes`, the role permissions must still match the repository JSON, and so on. The report lists accepted entries as `accepted_etag_drift`. **`initial`, `recovery`, `revoke` and `pilot` modes keep rejecting all such drift.**
+
+**Evidence (offline):** 33 new tests in `tests/test_access_window_plan_check.py`.
+- **Positive:** the exact etag-only drift passes, with 2 creates, 11 unchanged and `accepted_etag_drift = [runner_jobs]`.
+- **27 adversarial variants, all rejected:**
+  - role, member, project, condition or `id` changed after;
+  - a wrong role, member or condition on both sides, or an empty `id`;
+  - etag unchanged, missing or empty;
+  - a missing or extra attribute, a null `after`, unknown values;
+  - a delete, replace or no-op action;
+  - an indexed address, data mode or a different type;
+  - the same drift on the audit config;
+  - a duplicate entry, extra drift on a role;
+  - `runner_jobs` not `no-op` in the changes, or role permissions changed.
+- **Other modes:** the exception is refused in `initial`, `recovery` and `revoke`.
+- **No regressions:** all 20 earlier access adversarial cases still fail with the drift present.
+- **Direct tests of each layer:** a different address, and a role or member change reported by name.
+
+**Mutation check:** 10 mutations, all detected:
+- role and member changes ignored;
+- attribute set unchecked;
+- approved values unchecked;
+- unchanged etag accepted;
+- any action accepted;
+- exception allowed in all modes;
+- duplicates accepted;
+- index unchecked;
+- unknowns accepted;
+- any address accepted.
+
+The first pass missed 2, because the approved-value and caller-address checks already covered them. Direct tests now hit each layer. The file was restored byte-identical.
+
+**Residual risks of this exception:**
+- **Re-planning:** the access saved plan must be re-generated and its new SHA-256 approved. The rejected plan is not reused.
+- **Revoke will see the same pattern:** addressed by the bounded revoke exceptions in [Revocation readiness](#revocation-readiness-etag-drift-and-partial-failure).
+- **What the etag can't show:** it changes on *any* project-policy write. The exception proves the runner binding is unchanged, not that nothing else in the policy changed. Pre-check A2 (live project policy baseline) remains required before applying.
+
+## Revocation readiness: etag drift and partial failure
+
+### Expected drift (analysis; not assumed)
+
+The provider documents a project IAM resource's `etag` as "the etag of iam policy". The string is in the cached 7.31.0 provider binary, read without running it. So `runner_jobs`, `provisioner[0]` and the audit config each store the **project-policy** etag. The impersonation grant stores the **service-account** policy etag.
+
+| Event | Project policy etag | Expected effect on the revoke plan |
+| --- | --- | --- |
+| Access apply writes `provisioner[0]` | Changes | `runner_jobs` and the audit config keep the older etag → **likely etag-only update drift on both**. `provisioner[0]` stores the new etag → normally no drift |
+| Access apply writes `operator_impersonation[0]` | Unchanged (service-account policy) | None on project resources |
+| Any later project-policy write (Console, another apply) | Changes | The same two, plus **`provisioner[0]` etag drift** (not tolerated: see below) |
+
+The checker does **not** require this drift. A revoke plan with no drift, or with only one of the two entries, still passes.
+
+### Bounded exceptions (`etag_drift_problems`)
+
+| Mode | Tolerated etag-only drift |
+| --- | --- |
+| `access` | `google_project_iam_member.runner_jobs` (unchanged) |
+| `revoke` | `google_project_iam_member.runner_jobs` and `google_project_iam_audit_config.iamcredentials[0]` |
+| `initial`, `recovery`, `pilot` | None |
+
+An entry is accepted only if all of the following hold:
+- **Identity:**
+  - for `runner_jobs`: exact address, managed, type and name, with no index;
+  - for the audit config: index `0`;
+  - the actions are exactly `["update"]`.
+- **Shape:** `before` and `after` are objects with exactly the schema attributes:
+  - for `runner_jobs`: `condition`, `etag`, `id`, `member`, `project`, `role`;
+  - for the audit config: `audit_log_config`, `etag`, `id`, `project`, `service`, where each log-config entry has exactly `exempted_members` and `log_type`.
+- **Change:** every non-etag attribute is identical; both etags are non-empty strings and differ; **no `true` leaf anywhere** in `after_unknown` (deep check).
+- **Approved values, on both sides:**
+  - for `runner_jobs`: role `bankpilot_dev_jobs`, the runner member, this project, no condition, a non-empty `id`;
+  - for the audit config: service `iam.googleapis.com`, this project, log types exactly `ADMIN_READ` and `DATA_READ`, `exempted_members` empty, a non-empty `id`.
+- **At most one entry per address.** A duplicate is rejected, and so is any other drift.
+
+The existing revoke rules all still apply:
+- access is false and the expiry is null;
+- the 11 resources stay `no-op`;
+- exactly the 2 grants are deleted, or appear as delete drift (emergency removal);
+- no creates, and the forbidden-text scan.
+
+**Fails closed by construction:**
+- the attribute sets are exact, so a provider schema change makes the entries **rejected**, never silently accepted;
+- the exceptions widen acceptance only for etag changes on two resources whose security-relevant values are pinned on both sides.
+
+**Deliberately still blocked:**
+- etag drift on `provisioner[0]` or the impersonation grant, since both are being deleted and need no tolerance;
+- any drift on roles or service accounts;
+- any attribute change on the tolerated resources.
+
+### Revocation under partial failure
+
+The checker stays strict. A plan that does not match fails, and **the hard expiry still ends access** whatever happens to revocation. IAM evaluates `request.time < timestamp(EXP)` on every request for both grants, so nothing done or left undone after `EXP` extends access. Provisioner tokens minted before `EXP` cannot use the project role after `EXP`.
+
+| Situation | Revoke checker result | Safe procedure |
+| --- | --- | --- |
+| Normal (both grants in state) | `deletes 2`; `accepted_etag_drift` lists 0–2 tolerated entries | Approve the SHA-256, then apply |
+| Access apply created only one grant | `<other grant>: expected delete missing` | Confirm offline (`state list`) that only one grant address is in state, and live that the other binding does not exist. Then apply this reviewed plan under an explicit **manual override approval** that records the single checker problem. Or let it expire and revoke later |
+| Emergency Console removal of both grants | `already_removed` lists both, `deletes 0`, plus tolerated etag drift | Apply (it updates state only), then verify the live policies |
+| `provisioner[0]` etag drift, or any other unexpected drift | Rejected | Do not apply. Read back the live project policy and compare with the baseline plus the two grants. Remove the conditional bindings in the Console if needed (they expire anyway), then re-plan: the emergency path above |
+| Revoke apply fails part-way | — | Back up the state. Re-plan with `--mode revoke`: a grant already deleted is then absent (`expected delete missing` → the manual override row above). Verify the live policies |
+| Checker cannot run, or any doubt | — | Do nothing destructive. **Expiry is the safeguard.** Remove the bindings in the Console after review, then reconcile through the emergency path |
+
+**Refresh visibility caveat:**
+- If a refresh ever failed to see a still-present conditional binding, the plan would show it as delete drift, and the checker would accept it as `already_removed`.
+- The live read-back in step E5 is therefore mandatory after every revoke: the project policy must be the baseline and the service-account policy empty.
+
+### Evidence (offline)
+
+46 new tests:
+- **Positive:**
+  - revoke with no drift, runner drift only, audit drift only, or both in either order;
+  - both together with emergency delete drift;
+  - nested `after_unknown` structures with no `true` leaf.
+- **37 adversarial revoke cases, all rejected:**
+  - the audit config: service, log types, exemptions, keys, `id`, project, etag, null sides, nested unknowns, every wrong action, index, name, type, mode;
+  - duplicate audit or runner entries;
+  - a runner member or condition change;
+  - `provisioner[0]` etag drift, an impersonation update, role drift;
+  - the audit config or runner deleted in the changes;
+  - access re-enabled.
+- **No regressions:** all 8 earlier revoke adversarial cases still fail with the drift present; access mode still rejects audit drift; initial and recovery modes reject all of it.
+- **Direct tests of each layer:** the helper's messages for each check.
+
+**Mutation check:** 15 mutations, all detected:
+- audit drift tolerated in access mode;
+- `provisioner[0]` tolerated in revoke;
+- drift tolerated in initial mode;
+- duplicates accepted;
+- audit values unchecked;
+- exemptions unchecked;
+- log types unchecked;
+- log-config keys unchecked;
+- nested unknowns ignored;
+- index unchecked;
+- attribute set unchecked;
+- a service change ignored;
+- an unchanged etag accepted;
+- any action accepted;
+- the `before` side unchecked.
+
+The last one survived at first, because the identical-attributes rule makes the two layers overlap. A direct test now pins both. The file was restored byte-identical.
 
 ## Wrapper hardening: plan scope and refresh
 
@@ -250,8 +411,8 @@ The file was restored byte-identical.
 
 | File | Change |
 | --- | --- |
-| `scripts/bootstrap_plan_check.py` | `access`, `revoke` and `pilot` modes; null-expiry rule for disabled modes; `roles/iam.serviceAccount*` forbidden; constant-mutation fix |
-| `tests/test_access_window_plan_check.py` (new) | 58 tests: good access, pilot and revoke plans; emergency-removal revoke; 20 adversarial access, 8 revoke and 20 pilot plans; consistency with the real bootstrap condition template, the 8 h validation and the 18 module addresses; CLI |
+| `scripts/bootstrap_plan_check.py` | `access`, `revoke` and `pilot` modes; null-expiry rule for disabled modes; `roles/iam.serviceAccount*` forbidden; constant-mutation fix; bounded `etag`-only drift exceptions (`runner_jobs` in access mode; `runner_jobs` and the audit config in revoke mode); duplicate drift entries rejected; deep `after_unknown` check |
+| `tests/test_access_window_plan_check.py` (new) | 137 tests (58, plus 33 for the access etag exception and 46 for revocation readiness): good access, pilot and revoke plans; emergency-removal revoke; 20 adversarial access, 8 revoke and 20 pilot plans; consistency with the real bootstrap condition template, the 8 h validation and the 18 module addresses; CLI |
 | `Makefile` | `gcp-offline-check` includes the new tests |
 | `docs/index.md`, this file | Link and runbook |
 
@@ -279,8 +440,8 @@ The file was restored byte-identical.
 
 | Check | Result |
 | --- | --- |
-| Full `pytest` | **874 passed, 1 skipped** |
-| `make gcp-offline-check` | **630 passed, 1 skipped**; `terraform fmt` passed |
+| Full `pytest` | **953 passed, 1 skipped** |
+| `make gcp-offline-check` | **709 passed, 1 skipped**; `terraform fmt` passed |
 | `ruff check .` | Passed |
 | Docs validator, `git diff --check` | Passed |
 
