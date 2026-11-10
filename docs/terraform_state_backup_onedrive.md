@@ -28,14 +28,7 @@ Why not the alternatives: `openssl enc` has no authenticated mode; `age` and `gp
 
 1. **OneDrive folder (operator, browser only).** In `GCP-Banking-Terraform-Encrypted-Backups`, open *Manage access* and confirm that **no sharing link and no other person** exists. Confirm MFA on the Microsoft account. **Do not install or link the OneDrive desktop sync app** for this folder: browser upload only, so nothing appears under `~/Library/CloudStorage`. Personal Vault is optional; it adds a second unlock but auto-locks.
 2. **Passphrase (operator, password manager).** Generate a random password of at least 32 characters, or 6+ random words; the tool refuses fewer than 24 characters. Save it as a new item *"ebank-pilot Terraform backup encryption passphrase (M6M)"*. It must differ from the Microsoft account password. Keep a sealed paper copy apart from the laptop. Never type it into Claude, a chat, a file, a note or a commit. When pasting, prefer the password manager's auto-clearing clipboard; Universal Clipboard can copy it to other Apple devices.
-3. **Custody tree (gate 1, together with gate 8).** Add the backup directories to the M6L tree:
-
-   ```sh
-   umask 077
-   C="$HOME/.secure/ebank-pilot-dev-261031-k7m4"
-   mkdir -p -m 700 "$C"/backups/outbox "$C"/backups/inbox "$C"/recovery
-   chmod 700 "$C"/backups
-   ```
+3. **Custody tree (gate 1).** `python3 scripts/terraform_custody.py init-custody --confirm` creates the whole tree, including `backups/outbox`, `backups/inbox` and `recovery`, at 0700 (M6O). See [terraform_state_custody.md](terraform_state_custody.md#backend-wiring-m6o-implemented).
 
 ## Backup procedure (plain Terminal.app, never inside Claude Code)
 

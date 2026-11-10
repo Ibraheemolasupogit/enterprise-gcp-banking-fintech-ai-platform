@@ -47,6 +47,9 @@ LAYOUT = {
     "backups/outbox": None,
     "backups/inbox": None,
     "recovery": None,
+    # M6O: local backend workspace_dir per root (must stay empty: default workspace only).
+    "state/bootstrap/workspaces": None,
+    "state/pilot-dev/workspaces": None,
 }
 # Terraform root directories (relative to the repository) keyed by custody root name.
 ROOTS = {"bootstrap": Path("infrastructure/terraform/bootstrap"),

@@ -6,7 +6,13 @@ terraform {
       version = "~> 7.31.0"
     }
   }
-  # Local state for offline preparation. Approve a secured state location before deployment.
+  # M6O: state lives only in ~/.secure/ebank-pilot-dev-261031-k7m4/state/<root>/, supplied by
+  # scripts/terraform_custody.py via -backend-config. The /dev/null sentinel makes any init
+  # without it fail closed, so repository-local state is never the default.
+  backend "local" {
+    path          = "/dev/null/ebank-custody-init-required/terraform.tfstate"
+    workspace_dir = "/dev/null/ebank-custody-init-required/workspaces"
+  }
 }
 
 provider "google" {

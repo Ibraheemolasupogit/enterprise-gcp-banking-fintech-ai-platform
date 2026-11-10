@@ -1,6 +1,9 @@
-# Terraform state custody, backup and recovery (M6L design)
+# Terraform state custody, backup and recovery (M6L design; M6O backend implemented)
 
-**Design only.** No state, custody directory, backup medium or hook exists yet. Every implementation step below needs the approvals listed at the end.
+**Status (M6O, 2026-11-10):**
+- Both roots declare a fail-closed local backend.
+- The custody initialisation, preflight and wrapper tooling exist in [`scripts/terraform_custody.py`](../scripts/terraform_custody.py).
+- **The custody tree has not been created, and no Terraform state exists.** Creating the tree is an operator action (gate 1). Every later step still needs the approvals listed at the end.
 
 **Design choices approved by the user (M6L closeout, 2026-11-09):**
 - **State root:** `~/.secure/ebank-pilot-dev-261031-k7m4/`, on the FileVault-protected internal Data volume.
@@ -38,47 +41,87 @@ Ownership and isolation:
 - Each root has its own state directory, inputs file and `TF_DATA_DIR`, so a backend cache from one root cannot be reused by the other.
 - Record each state's **lineage** after its first apply. Every later backup must match it.
 
-Future backend wiring is a code change at approval gate 8 and is **not implemented in M6L**: both roots still have no `backend` block, and a test asserts this. At that gate, add a partial `backend "local" {}` to both roots, then initialise with **both** `path` and `workspace_dir`:
+### Backend wiring (M6O, implemented)
 
-```sh
-umask 077
-export CHECKPOINT_DISABLE=1
-export TF_DATA_DIR="$HOME/.secure/ebank-pilot-dev-261031-k7m4/tfdata/bootstrap"
-terraform -chdir=infrastructure/terraform/bootstrap init \
-  -backend-config="path=$HOME/.secure/ebank-pilot-dev-261031-k7m4/state/bootstrap/terraform.tfstate" \
-  -backend-config="workspace_dir=$HOME/.secure/ebank-pilot-dev-261031-k7m4/state/bootstrap/workspaces"
-python3 scripts/state_custody.py check --root bootstrap   # must exit 0 before any later command
+Both roots declare the same explicit local backend, set to an **impossible sentinel**:
+
+```hcl
+  backend "local" {
+    path          = "/dev/null/ebank-custody-init-required/terraform.tfstate"
+    workspace_dir = "/dev/null/ebank-custody-init-required/workspaces"
+  }
 ```
 
-The pilot root follows the same pattern with `pilot-dev`.
+`/dev/null` is not a directory, so neither path can ever be created. The committed text contains no username. The real per-root custody paths are supplied **only** through `-backend-config`, which overrides both values. Only the wrapper supplies them:
+
+```sh
+# Terminal.app, never inside Claude Code; from the repository root.
+python3 scripts/terraform_custody.py init-custody            # dry run: lists the 0700 directories
+python3 scripts/terraform_custody.py init-custody --confirm  # gate 1: creates the tree, no state
+python3 scripts/terraform_custody.py preflight --root bootstrap --phase init
+python3 scripts/terraform_custody.py run --root bootstrap -- init      # gate 8 execution
+python3 scripts/terraform_custody.py run --root bootstrap -- validate
+```
+
+`run` performs the preflight, then executes Terraform with:
+- `-chdir=<root>`;
+- `TF_DATA_DIR=tfdata/<root>`;
+- `CHECKPOINT_DISABLE=1`;
+- umask 077;
+- every other `TF_*` variable removed (except `TF_LOG`, `TF_LOG_PATH`, `TF_IN_AUTOMATION` and `TF_INPUT`);
+- for `init`: `-input=false -lockfile=readonly -backend-config=path=… -backend-config=workspace_dir=…`.
+
+After `init`, it re-checks that the backend cache points at this root's custody paths and is 0600, and that no state artefact appeared under the repository. `--dry-run` shows the command and the preflight result without running anything. The pilot root uses `--root pilot-dev`.
+
+**Command policy.**
+- **Allowed:** `init`, `validate`, `plan`, `apply`, `show`, `output`, `providers`, `version`, `state list` and `state show`.
+- **Plans:** `plan` must use `-out=` inside `plans/<root>/`. `apply` takes exactly one saved plan from `plans/<root>/`, so there is no unplanned apply and no other root's plan. `-var-file=` must be inside custody `inputs/`.
+- **Refused commands:** `destroy`, `import`, `state rm/mv/push`, `workspace`, `force-unlock`, `taint`, `refresh` and `console`.
+- **Refused flags:** `-lock` set to false/0, `-state`, `-state-out`, `-backup`, `-backend`, `-backend-config`, `-migrate-state`, `-force-copy`, `-chdir`, `-destroy`, `-upgrade`, `-lockfile`, `-plugin-dir` and `-from-module`; the `--flag` spellings; and the space-separated `-out x` / `-var-file x` forms.
+- **Exceptions:** any refused command that is ever needed requires a reviewed wrapper change and a fresh verified backup first.
 
 ### Fail-safe review: what happens when initialisation or backend configuration is omitted
 
-These results come from Terraform 1.16.5 in disposable sandboxes (no providers, no resources; only `init`, `state list` and `workspace`). They are encoded as tests in `tests/test_state_custody.py`.
+M6L results come from Terraform 1.16.5 with `backend "local" {}`. M6O re-ran them against the **exact sentinel block of the real roots**. Both used disposable sandboxes with no providers or resources, running only `init`, `state list` and `workspace`. They are encoded in `tests/test_state_custody.py` and `tests/test_terraform_custody.py`.
 
-| Case | Result | Status |
+| Case | M6L (`backend "local" {}`) | **M6O (sentinel backend)** |
 | --- | --- | --- |
-| `backend "local" {}` present, `init` never run (repository `.terraform/` or a fresh `TF_DATA_DIR`) | "Backend initialization required"; nothing written | **Fails closed** |
-| Correct custody `init`, then `TF_DATA_DIR` forgotten | "Backend initialization required"; nothing written | **Fails closed** |
-| `init` run **without** `-backend-config` | Succeeds. The cached `path` is unset, so state defaults to `./terraform.tfstate` in the repository root directory | **Fails open.** Caught by `check --root` |
-| `TF_WORKSPACE=dev`, with `workspace_dir` not set | Even a read-only `state list` **creates `terraform.tfstate.d/dev/` in the repository** | **Fails open.** Fixed by `-backend-config=workspace_dir=…`; `check --root` refuses both |
-| `TF_WORKSPACE=dev`, with custody `workspace_dir` | The directory is created inside custody, not in the repository | Contained; still refused by preflight |
-| `init` alone (correct config) | No state file created | Safe |
-| **Today's roots:** no backend block (implicit local backend); the pilot `.terraform/` is already initialised | A future apply would write `infrastructure/terraform/terraform.tfstate` inside the iCloud-synced repository | **Fails open.** No apply is approved; gate 8 must precede or accompany gate 1 |
+| `init` never run (repository `.terraform/` or fresh `TF_DATA_DIR`) | Fails closed | **Fails closed** ("Backend initialization required") |
+| Correct custody `init`, then `TF_DATA_DIR` forgotten | Fails closed | **Fails closed** |
+| `init` **without** `-backend-config` | **Fails open**: state would default to `./terraform.tfstate` in the repository | **Fails closed**: `Failed to get existing workspaces: … not a directory`; no backend cache written |
+| `init` with only `path` overridden | — | **Fails closed** (workspace sentinel) |
+| `init` with only `workspace_dir` overridden | — | **Fails closed**: init errors; state can only be loaded from the unreachable sentinel |
+| `init -backend=false` | — | init succeeds, but every state command stops at "Backend initialization required". The wrapper refuses `-backend` |
+| `TF_WORKSPACE=dev` without custody `workspace_dir` | **Fails open**: creates `terraform.tfstate.d/` in the repository | **Fails closed**; nothing is created; the preflight refuses `TF_WORKSPACE` |
+| Wrapper `init` (correct config) | — | Cache 0600 with this root's custody paths only; **no state file created**; nothing under the repository |
+| Cross-root contamination (one root's cache points at the other's state) | — | The preflight refuses **both** roots |
 
-A Terraform-native default cannot close the two fail-open cases. `-backend-config` overrides any hard-coded `path`, and an unwritable sentinel path would fail only **after** cloud changes, when state is written, orphaning resources. The safeguard is therefore a **mandatory preflight**: `python3 scripts/state_custody.py check --root <bootstrap|pilot-dev>` must exit 0 before every state-touching command. It refuses when:
-- `TF_DATA_DIR` is not `tfdata/<root>` in custody;
-- the backend cache is missing, is not `local`, or its `path`/`workspace_dir` are not the exact custody locations;
-- `TF_WORKSPACE` is non-default;
-- `CHECKPOINT_DISABLE` is not `1`;
-- `umask` is not 077;
-- the location policy, FileVault or mode checks fail;
-- **any** `*.tfstate*`, `terraform.tfstate.d`, `*.tfplan` or lock-info file exists anywhere under the repository, git-ignored or not.
+M6L's concern that a sentinel "would fail only after cloud changes" applied to a writable or late-failing path. With the `/dev/null` sentinel, `init` itself fails, so no plan or apply can start. A deliberate `-backend-config` naming a wrong path is still possible outside the wrapper; the run-phase preflight catches it.
+
+**Preflight** (`terraform_custody.py preflight --root <root> --phase init|run`, also run automatically by `run`). It is read-only and refuses on any of the following:
+- **location:** the custody path fails the M6L policy (repository, Desktop, Documents, Downloads, iCloud, CloudStorage, or outside home);
+- **symlinks:** `~/.secure` or the custody root is a symlink or resolves elsewhere; any custody directory is a symlink;
+- **Git:** the custody root is inside **any** Git working tree, or the repository itself sits in a synchronised location;
+- **tree contents:**
+  - a directory is missing or not 0700;
+  - a file is not 0600, or not owned by the operator;
+  - the Spotlight marker is missing;
+  - `state/<root>/` holds anything other than `terraform.tfstate`, `.backup`, lock info and `workspaces/`;
+- **environment:**
+  - `TF_WORKSPACE` is non-default;
+  - any `TF_CLI_ARGS*`, `TF_CLI_CONFIG_FILE` or `TF_PLUGIN_CACHE_DIR` is set;
+  - `TF_LOG` is set without `TF_LOG_PATH` inside custody `logs/`;
+  - `TF_DATA_DIR` is set to anything but this root's `tfdata/<root>`;
+- **root isolation:** either root's backend cache points at a path other than its own custody paths;
+- **repository artefacts:** **any** state, plan, lock or workspace artefact under the repository;
+- **backend block:** this root lacks the sentinel backend block;
+- **FileVault** is not confirmed;
+- **run phase only:** the backend cache is missing or not local, or its `path`/`workspace_dir` are not the exact custody paths.
 
 Further rules:
-- **Default workspace only.** `terraform workspace new/select` and `TF_WORKSPACE` are prohibited.
-- **`export CHECKPOINT_DISABLE=1`.** Otherwise even `terraform version` contacts HashiCorp's checkpoint service; this was observed on 2026-11-09 and is unrelated to GCP.
-- **Before gate 8, remove the repository's provider-cache-only `.terraform/` directories**, or simply never use them, so that only custody `TF_DATA_DIR`s are ever initialised. This is a separate, reversible approval.
+- **Default workspace only.**
+- **`CHECKPOINT_DISABLE=1`**, which the wrapper always sets.
+- The repository's provider-cache-only `.terraform/` directories hold **no backend cache** and are harmless: an init there fails closed. Removing them stays optional.
 
 `python3 scripts/state_custody.py check` (without `--root`) verifies the location policy, FileVault, modes and ownership, symlinks, stray state under the repository and `umask 077`. Terraform creates files as `0666 & ~umask`, so the **default umask 022 would produce world-readable state**. The 0700 directories are the second barrier.
 
@@ -151,14 +194,15 @@ Once real state exists, repeat step 1 against the newest real backup of each roo
 
 ## Approvals required before any real state exists
 
-1. Create the custody tree at the exact path and modes above, including `backups/outbox`, `backups/inbox` and `recovery`, plus the Spotlight exclusion.
-2. ~~Choose the backup medium~~: **OneDrive selected (M6M).** The operator still confirms the folder is private, MFA is on, and no sync client is linked.
-3. Generate the backup passphrase in the password manager and make the sealed paper copy (operator-only).
-4. Run a browser round trip with a **synthetic** encrypted fixture before any real state exists. Not yet implemented: it needs a small `rehearse` command and its own approval.
-5. ~~Name the custodian and approve retention~~: **approved**, including the newest-verified-regardless-of-age rule.
-6. ~~Relocate the repository out of `~/Desktop`~~: done by the operator. The `outputs/runs` M6* evidence relocation into custody is still open (needs gate 1).
+1. **Create the custody tree** (operator, Terminal.app): `python3 scripts/terraform_custody.py init-custody --confirm`, then `preflight --root bootstrap --phase init` and `preflight --root pilot-dev --phase init`, both of which must report no problems. Optionally also add `~/.secure` to System Settings → Spotlight → Privacy (see M6O risks).
+2. ~~Choose the backup medium~~: **OneDrive selected (M6M).**
+3. ~~Backup passphrase~~: **generated and stored by the operator (M6N preconditions).**
+4. ~~Synthetic browser round trip~~: **passed (M6N).**
+5. ~~Custodian and retention~~: **approved.**
+6. ~~Repository relocation~~: **done.** The `outputs/runs` M6* evidence relocation into custody is still open; it needs gate 1.
 7. Optionally install the pre-commit hook.
-8. Approve the backend code change: `backend "local" {}` plus the `path` and `workspace_dir` partial config, the `TF_DATA_DIR` convention and the mandatory `check --root` preflight. This must precede or accompany gate 1.
-9. ~~Declare the `cryptography` dependency~~: **done (M6M hardening).** `cryptography>=46.0.0,<51` is in `pyproject.toml` and `requirements.txt`.
+8. ~~Backend code change~~: **implemented in M6O** (sentinel backend, wrapper, preflight; pending the operator's review and commit). **Executing** `run --root <root> -- init` (provider download from the Terraform registry into custody `tfdata/`; no GCP call, no state) is a separate operator step after gate 1.
+9. ~~`cryptography` dependency~~: **done.**
+10. **First real state:** only through the M6K bootstrap gates (saved plan in `plans/bootstrap/`, explicit approval), immediately followed by the first real encrypted backup and download-verify for that root.
 
 Only after these can the M6K bootstrap gates proceed.

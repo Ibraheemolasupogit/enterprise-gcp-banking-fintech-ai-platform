@@ -257,7 +257,10 @@ def test_repository_holds_no_state_plan_lock_or_workspace_artifacts_on_disk():
     assert custody.stray_state_paths(ROOT) == []  # includes git-ignored files
 
 
-def test_backend_blocks_not_yet_implemented():
-    # M6L records the design only; adding `backend "local" {}` is approval gate 8.
+def test_backend_blocks_use_fail_closed_sentinel():
+    # M6O (gate 8): explicit local backend with a /dev/null sentinel; custody paths are supplied
+    # only via -backend-config by scripts/terraform_custody.py (tests/test_terraform_custody.py).
     for root in custody.ROOTS.values():
-        assert 'backend "' not in (ROOT / root / "main.tf").read_text()
+        text = (ROOT / root / "main.tf").read_text()
+        assert text.count('backend "') == 1 and 'backend "local"' in text
+        assert 'path          = "/dev/null/' in text and 'workspace_dir = "/dev/null/' in text
