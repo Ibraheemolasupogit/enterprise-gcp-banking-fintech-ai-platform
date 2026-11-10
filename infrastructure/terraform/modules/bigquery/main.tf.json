@@ -21,7 +21,7 @@
     "google_bigquery_dataset_iam_policy": {
       "metadata": {
         "dataset_id": "${google_bigquery_dataset.foundation.dataset_id}",
-        "policy_data": "${jsonencode({bindings = [{role = var.metadata_role, members = [\"serviceAccount:${var.runner_email}\"]}]})}",
+        "policy_data": "${jsonencode({bindings = [{role = \"roles/bigquery.dataOwner\", members = [var.dataset_owner]}, {role = var.metadata_role, members = [\"serviceAccount:${var.runner_email}\"]}]})}",
         "project": "${var.project_id}"
       }
     },
@@ -53,6 +53,10 @@
   "variable": {
     "dataset_id": {
       "type": "string"
+    },
+    "dataset_owner": {
+      "type": "string",
+      "description": "M6T: approved user: direct dataset owner (BigQuery requires one; the policy is authoritative)."
     },
     "labels": {
       "type": "map(string)"

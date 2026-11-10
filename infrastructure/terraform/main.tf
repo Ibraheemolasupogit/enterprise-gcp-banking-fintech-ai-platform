@@ -71,6 +71,7 @@ module "bigquery" {
   reader_role   = module.identity.reader_role
   table_role    = module.identity.table_role
   metadata_role = module.identity.metadata_role
+  dataset_owner = var.dataset_owner_member
 }
 
 output "inventory" {

@@ -56,3 +56,18 @@ variable "provisioner_service_account" {
     error_message = "Supply a same-project provisioner service account distinct from the runner."
   }
 }
+
+# M6T (D1): BigQuery requires a directly assigned dataset owner, and the dataset policy is
+# authoritative. Exactly one approved human user:, never a service account, group, domain or
+# special group. Required (no default): supplied only from the private custody inputs file.
+variable "dataset_owner_member" {
+  type        = string
+  description = "Approved single user: principal granted roles/bigquery.dataOwner on the dataset."
+  validation {
+    condition = (
+      can(regex("^user:[^@\\s,]+@[^@\\s,]+\\.[^@\\s,]+$", var.dataset_owner_member))
+      && !endswith(lower(var.dataset_owner_member), ".gserviceaccount.com")
+    )
+    error_message = "dataset_owner_member must be exactly one approved user: principal (no service accounts, groups, domains or lists)."
+  }
+}

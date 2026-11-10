@@ -244,8 +244,18 @@ def test_disabled_modes_require_null_expiry():
 
 # ---------------------------------------------------------------- pilot deployment
 
+DATASET_OWNER = "user:approved-dataset-owner@example.invalid"
+
+
 def _policy(role):
     return json.dumps({"bindings": [{"role": role, "members": [RUNNER]}]})
+
+
+def _dataset_policy(owner=DATASET_OWNER, role=None):
+    """M6T compliant dataset policy: the approved owner plus the runner metadata role."""
+    return json.dumps({"bindings": [
+        {"role": "roles/bigquery.dataOwner", "members": [owner]},
+        {"role": role or f"{bpc.ROLE_PREFIX}metadata", "members": [RUNNER]}]})
 
 
 def pilot_plan() -> dict:
@@ -266,7 +276,7 @@ def pilot_plan() -> dict:
             ["create"]),
         _rc("module.bigquery.google_bigquery_dataset_iam_policy.metadata",
             "google_bigquery_dataset_iam_policy", "metadata",
-            {"project": P, "policy_data": _policy(f"{bpc.ROLE_PREFIX}metadata")}, ["create"]),
+            {"project": P, "policy_data": _dataset_policy()}, ["create"]),
     ]
     for t in tables:
         rcs.append(_rc(f'module.bigquery.google_bigquery_table.products["{t}"]',
@@ -280,6 +290,7 @@ def pilot_plan() -> dict:
                         "member": RUNNER, "role": f"{bpc.ROLE_PREFIX}{role}"}, ["create"]))
     variables = {k: {"value": v} for k, v in bpc.PILOT_VARIABLES.items()}
     variables["bucket_name"] = {"value": "private-synthetic-bucket-name"}
+    variables["dataset_owner_member"] = {"value": DATASET_OWNER}
     # The identity module's data source legitimately records the Owner binding in prior_state.
     prior = {"values": {"root_module": {"child_modules": [{"resources": [{
         "address": "module.identity.data.google_project_iam_policy.project", "mode": "data",
@@ -290,7 +301,7 @@ def pilot_plan() -> dict:
 
 
 def test_pilot_plan_is_18_runner_only_creates():
-    r = bpc.check_plan(pilot_plan(), "pilot")
+    r = bpc.check_plan(pilot_plan(), "pilot", dataset_owner=DATASET_OWNER)
     assert r["ok"], r["problems"]
     assert r["creates"] == 18 and r["unchanged"] == 0 and r["deletes"] == 0
     assert r["counts"] == {"google_storage_bucket": 1, "google_storage_bucket_iam_policy": 1,
@@ -322,7 +333,7 @@ PILOT_BAD = {
                                   "members": [RUNNER, OPERATOR]}]})),
     "dataset policy wrong role": _set(
         _pa("module.bigquery.google_bigquery_dataset_iam_policy.metadata"), "policy_data",
-        _policy(f"{bpc.ROLE_PREFIX}tables")),
+        _dataset_policy(role=f"{bpc.ROLE_PREFIX}tables")),
     "dataset delete contents": _set(DATASET, "delete_contents_on_destroy", True),
     "dataset other location": _set(DATASET, "location", "EU"),
     "table unprotected": _set(_pa('module.bigquery.google_bigquery_table.products["customers"]'),
@@ -356,7 +367,7 @@ PILOT_BAD = {
 def test_adversarial_pilot_plans_are_rejected(name):
     p = pilot_plan()
     PILOT_BAD[name](p)
-    assert not bpc.check_plan(p, "pilot")["ok"], name
+    assert not bpc.check_plan(p, "pilot", dataset_owner=DATASET_OWNER)["ok"], name
 
 
 # ---------------------------------------------------------------- consistency with Terraform
@@ -401,7 +412,8 @@ def test_cli_accepts_new_modes():
                          input=json.dumps(access_plan()), capture_output=True, text=True,
                          check=False)
     assert out.returncode == 0 and json.loads(out.stdout)["ok"]
-    bad = subprocess.run([sys.executable, "-I", str(SCRIPT), "--mode", "pilot"],
+    bad = subprocess.run([sys.executable, "-I", str(SCRIPT), "--mode", "pilot",
+                          f"--dataset-owner={DATASET_OWNER}"],
                          input=json.dumps(access_plan()), capture_output=True, text=True,
                          check=False)
     assert bad.returncode == 1

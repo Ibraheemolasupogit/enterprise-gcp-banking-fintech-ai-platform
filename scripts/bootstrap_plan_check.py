@@ -17,9 +17,13 @@ Bootstrap root modes:
   revoke    M6S revocation: access disabled; the 11 bootstrap resources are unchanged and the
             two conditional grants are deleted (or were already removed outside Terraform).
 
-Pilot root mode:
-  pilot     M6S first pilot deployment: exactly 18 creates (bucket, dataset, 7 tables, two
-            resource-level policies and 7 table members), all bound to the runner only.
+Pilot root modes (both require --dataset-owner=user:<approved owner>; M6T):
+  pilot           First pilot deployment: exactly 18 creates (bucket, dataset, 7 tables, two
+                  resource-level policies and 7 table members). The bucket and table grants
+                  bind only the runner; the authoritative dataset policy binds exactly the
+                  approved owner (roles/bigquery.dataOwner) and the runner metadata role.
+  pilot-recovery  After the M6S partial apply (17/18): the 17 created resources unchanged and
+                  exactly one create of the dataset policy, with the same content rule.
 
 Exit 0 when ok, 1 when the plan has problems, 2 when the input cannot be parsed.
 
@@ -69,7 +73,12 @@ PILOT_SCAN_KEYS = ("variables", "resource_changes", "resource_drift", "output_ch
                    "configuration")
 READER_TABLES = {"curated_transactions", "customers", "accounts"}
 BOOTSTRAP_MODES = ("initial", "recovery", "access", "revoke")
-MODES = (*BOOTSTRAP_MODES, "pilot")
+PILOT_MODES = ("pilot", "pilot-recovery")
+MODES = (*BOOTSTRAP_MODES, *PILOT_MODES)
+DATASET_POLICY = "module.bigquery.google_bigquery_dataset_iam_policy.metadata"
+DATASET_OWNER_ROLE = "roles/bigquery.dataOwner"
+# Mirrors the pilot dataset_owner_member validation in infrastructure/terraform/variables.tf.
+DATASET_OWNER_RE = re.compile(r"^user:[^@\s,]+@[^@\s,]+\.[^@\s,]+$")
 
 
 def expected_roles(iam: Path = IAM) -> dict[str, set[str]]:
@@ -396,6 +405,40 @@ def _forbid(plan: dict, words: tuple[str, ...], problems: list[str],
             problems.append(f"forbidden token present: {bad}")
 
 
+def dataset_owner_problems(owner: object) -> list[str]:
+    """M6T: the dataset owner must be an explicitly approved single human ``user:``.
+
+    BigQuery rejects a dataset policy without a directly assigned owner (HTTP 400 "No owners
+    specified"). The owner is an operator decision: never defaulted, never the runner or
+    provisioner (or any service account), never a group, domain, special group or public.
+    """
+    if owner is None:
+        return ["dataset owner not supplied (operator approval required: --dataset-owner)"]
+    if not DATASET_OWNER_RE.match(str(owner)) or str(owner).lower().endswith(
+            ".gserviceaccount.com"):
+        return ["dataset owner must be a single approved user: principal"]
+    return []
+
+
+def _dataset_policy_ok(policy_data: object, owner: object) -> bool:
+    """Exactly two unconditional bindings: runner -> metadata role; approved owner -> owner."""
+    try:
+        policy = json.loads(policy_data) if isinstance(policy_data, str) else None
+    except ValueError:
+        return False
+    if not isinstance(policy, dict) or set(policy) != {"bindings"} or dataset_owner_problems(
+            owner):
+        return False
+    bindings = policy["bindings"]
+    # Exact equality below also rejects any extra key such as a binding condition.
+    if not isinstance(bindings, list) or not all(isinstance(b, dict) for b in bindings):
+        return False
+    want = [{"role": DATASET_OWNER_ROLE, "members": [owner]},
+            {"role": f"{ROLE_PREFIX}metadata", "members": [f"serviceAccount:{RUNNER_EMAIL}"]}]
+    by_role = lambda b: str(b["role"])  # noqa: E731
+    return sorted(bindings, key=by_role) == sorted(want, key=by_role)
+
+
 def _policy_is_runner_only(policy_data: object, role: str) -> bool:
     try:
         policy = json.loads(policy_data) if isinstance(policy_data, str) else None
@@ -407,7 +450,7 @@ def _policy_is_runner_only(policy_data: object, role: str) -> bool:
                                        "members": [f"serviceAccount:{RUNNER_EMAIL}"]}]
 
 
-def _check_pilot_values(rc: dict, problems: list[str]) -> None:
+def _check_pilot_values(rc: dict, problems: list[str], owner: object = None) -> None:
     addr, kind, after = rc["address"], rc["type"], rc["change"].get("after") or {}
     dataset = f"{PREFIX}_{ENVIRONMENT}"
     if after.get("project") not in (None, PROJECT):
@@ -430,9 +473,11 @@ def _check_pilot_values(rc: dict, problems: list[str]) -> None:
         if after.get("delete_contents_on_destroy") is not False:
             problems.append(f"{addr}: dataset delete_contents_on_destroy must be false")
     elif kind == "google_bigquery_dataset_iam_policy":
-        if not _policy_is_runner_only(after.get("policy_data"), f"{ROLE_PREFIX}metadata"):
-            problems.append(f"{addr}: dataset policy must bind only the runner "
-                            "to the metadata role")
+        # M6T: authoritative, so it must keep a direct owner (BigQuery HTTP 400 otherwise)
+        # and must contain nothing else: no creator/provisioner OWNER, no special groups.
+        if not _dataset_policy_ok(after.get("policy_data"), owner):
+            problems.append(f"{addr}: dataset policy must be exactly the approved owner "
+                            "(roles/bigquery.dataOwner) and the runner metadata role")
     elif kind == "google_bigquery_table":
         if after.get("deletion_protection") is not True or after.get("dataset_id") != dataset:
             problems.append(f"{addr}: table must be deletion-protected in {dataset}")
@@ -458,33 +503,46 @@ def pilot_addresses() -> set[str]:
     }
 
 
-def _check_pilot(plan: dict) -> dict:
-    problems: list[str] = []
+def _check_pilot(plan: dict, mode: str = "pilot", owner: object = None) -> dict:
+    """``pilot``: 18 creates. ``pilot-recovery`` (M6T): after the partial apply, the 17
+    created resources are unchanged and the only change is one create of the dataset policy."""
+    problems: list[str] = list(dataset_owner_problems(owner))
     variables = plan.get("variables") or {}
     _check_variables(variables, PILOT_VARIABLES, problems)
     if not (variables.get("bucket_name") or {}).get("value"):
         problems.append("variable bucket_name is missing")
+    if (variables.get("dataset_owner_member") or {}).get("value") != owner:
+        problems.append("variable dataset_owner_member is not the approved dataset owner")
     for rc in plan.get("resource_drift") or []:
         problems.append(f"drift detected outside Terraform: {rc.get('address')}")
-    report = _classify(plan, problems, lambda rc: _check_pilot_values(rc, problems))
-    _compare(report, pilot_addresses(), set(), set(), problems)
+    report = _classify(plan, problems, lambda rc: _check_pilot_values(rc, problems, owner))
+    if mode == "pilot":
+        _compare(report, pilot_addresses(), set(), set(), problems)
+    else:
+        _compare(report, {DATASET_POLICY}, pilot_addresses() - {DATASET_POLICY}, set(),
+                 problems)
     # prior_state legitimately holds the identity module's project-policy data source (the
     # Owner binding), so the pilot scan covers everything the plan would change or configure.
     _forbid(plan, PILOT_FORBIDDEN, problems, PILOT_SCAN_KEYS)
-    report.update(mode="pilot", problems=problems, ok=not problems)
+    report.update(mode=mode, dataset_owner_approved=not dataset_owner_problems(owner),
+                  problems=problems, ok=not problems)
     return report
 
 
-def check_plan(plan: dict, mode: str, iam: Path = IAM) -> dict:
+def check_plan(plan: dict, mode: str, iam: Path = IAM, dataset_owner: object = None) -> dict:
     if mode not in MODES:
         raise ValueError(f"unknown mode: {mode}")
-    return _check_pilot(plan) if mode == "pilot" else _check_bootstrap(plan, mode, iam)
+    if mode in PILOT_MODES:
+        return _check_pilot(plan, mode, dataset_owner)
+    return _check_bootstrap(plan, mode, iam)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--mode", choices=MODES, required=True)
+    parser.add_argument("--dataset-owner", default=None,
+                        help="pilot modes: the approved user: dataset owner (never printed)")
     args = parser.parse_args(argv)
     try:
         plan = json.load(sys.stdin)
@@ -493,7 +551,7 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         print(json.dumps({"ok": False, "problems": [f"invalid plan JSON: {exc}"]}))
         return 2
-    report = check_plan(plan, args.mode)
+    report = check_plan(plan, args.mode, dataset_owner=args.dataset_owner)
     print(json.dumps(report, indent=2))
     return 0 if report["ok"] else 1
 

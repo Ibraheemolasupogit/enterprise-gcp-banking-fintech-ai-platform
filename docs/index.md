@@ -75,4 +75,5 @@ Use this index to navigate the project documentation.
 - [M6Q bootstrap audit-config recovery](upgrade/m6q_validation.md)
 - [M6R post-bootstrap GCP security verification](upgrade/m6r_validation.md)
 - [M6S provisioner-access window readiness](upgrade/m6s_validation.md)
+- [M6T BigQuery dataset IAM partial-apply recovery](upgrade/m6t_validation.md)
 - [M5 validation](upgrade/m5_validation.md)

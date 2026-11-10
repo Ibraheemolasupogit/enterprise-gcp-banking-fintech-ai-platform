@@ -122,7 +122,7 @@ env -i HOME="$HOME" PATH="$PATH" python3 scripts/terraform_custody.py run --root
 4. Then, immediately: `state_backup.py create --root pilot-dev`, upload, then `verify-download`.
 5. **Verify** with read-only reads:
    - the bucket is private, uses uniform access and sits in `europe-west2`;
-   - the dataset access lists only the runner metadata role, and the provisioner keeps no creator OWNER entry;
+   - the dataset access lists only the runner metadata role, and the provisioner keeps no creator OWNER entry. **Superseded by [M6T](m6t_validation.md):** BigQuery requires a direct dataset owner, so the policy must also bind an approved owner;
    - all 7 tables exist and are empty, and the runner has its table roles.
 
 ### D. Audit-event test (inside the window)
