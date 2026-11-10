@@ -1,6 +1,6 @@
 # Encrypted Terraform state backups to OneDrive (M6M runbook)
 
-**Prepared offline. Not yet executed.** No custody tree, real state, backend block, passphrase or OneDrive upload exists. Every step that touches real state waits for the approvals in [M6M evidence](upgrade/m6m_validation.md#approvals-required). Tooling: [`scripts/state_backup.py`](../scripts/state_backup.py). It never contacts a cloud API and never uploads, downloads or reads browser sessions or credentials. Custody layout and preflight: [terraform_state_custody.md](terraform_state_custody.md).
+**Status (2026-11-10): the M6N synthetic browser drill passed** ([evidence](upgrade/m6n_validation.md)). It covered a real OneDrive round trip and recovery of a synthetic fixture with the operator's passphrase. **No real state has been backed up or restored:** the custody tree, backend block and real backups do not exist yet. Every step that touches real state waits for the approvals in [M6M evidence](upgrade/m6m_validation.md#approvals-required). Tooling: [`scripts/state_backup.py`](../scripts/state_backup.py). It never contacts a cloud API and never uploads, downloads or reads browser sessions or credentials. Custody layout and preflight: [terraform_state_custody.md](terraform_state_custody.md).
 
 ## Design summary
 
@@ -78,6 +78,28 @@ OneDrive keeps deleted files in its recycle bin for a while. They are ciphertext
 | Root, serial, timestamp or lineage mismatch | Wrong or substituted file. Do not use it. Investigate |
 | OneDrive unavailable or account locked | No independent backup is reachable. No state-changing Terraform command may run until one verifies again |
 | Passphrase believed exposed | Generate a new passphrase, create and verify new backups, then delete every backup made with the old one (their contents stay readable to anyone holding the old passphrase) |
+
+## M6N synthetic browser drill (before any real state)
+
+This proves the real browser round trip and the operator's escrowed passphrase using a **synthetic fixture only**:
+- no custody tree, backend or real state;
+- a disposable `~/m6n-onedrive-drill/`, outside the repository, outside `~/.secure` and outside synced folders, containing a `SYNTHETIC-DRILL-NOT-REAL-STATE.txt` marker;
+- file names prefixed `m6n-synthetic-drill-`, which the real `verify-download` refuses.
+
+Run every command in **Terminal.app**, not in Claude Code (the tool refuses there), from the repository root:
+
+1. `python3 scripts/state_backup.py rehearse-create`. Paste the backup passphrase twice from the password manager. This writes a fake bootstrap state (zero resources, lineage `m6n-fixture-bootstrap-*`), encrypts it with the production code path, deletes the plaintext and prints the `.enc` path, size and SHA256.
+2. Upload that single file to `GCP-Banking-Terraform-Encrypted-Backups` (⌘⇧G → `~/m6n-onedrive-drill/backups/outbox/`), then download it back (*Download* → `~/Downloads`).
+3. `python3 scripts/state_backup.py rehearse-verify --downloaded ~/Downloads/<file>`. Paste the passphrase once. This checks:
+   - the downloaded bytes against the ledger;
+   - that a restore as `pilot-dev` is refused;
+   - that a random wrong passphrase is refused;
+   - that **the operator passphrase authenticates**;
+   - every name, header, manifest, SHA256 and lineage check;
+   - that the recovered fixture matches and that `terraform show -json` parses.
+
+   A non-secret report is written to `~/m6n-onedrive-drill/evidence-<UTC>.json`. Exit 0 means the drill passed.
+4. Clean up: delete `~/Downloads/<file>`; delete the drill file from OneDrive, or keep it as a passphrase canary; then `rm -rf ~/m6n-onedrive-drill`.
 
 ## Residual risks
 

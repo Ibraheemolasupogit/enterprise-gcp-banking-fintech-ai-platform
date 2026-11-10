@@ -69,5 +69,5 @@ Use this index to navigate the project documentation.
 - [ADR-003 separated IAM bootstrap](architecture_decisions/ADR-003-separated-iam-bootstrap.md)
 - [M6J security review](upgrade/m6j_review.md) and [M6K remediation evidence](upgrade/m6k_validation.md)
 - [M6L Terraform state custody design](terraform_state_custody.md) and [M6L evidence](upgrade/m6l_validation.md)
-- [M6M encrypted OneDrive state backup runbook](terraform_state_backup_onedrive.md) and [M6M evidence](upgrade/m6m_validation.md)
+- [M6M encrypted OneDrive state backup runbook](terraform_state_backup_onedrive.md) and [M6M evidence](upgrade/m6m_validation.md); [M6N synthetic OneDrive drill](upgrade/m6n_validation.md)
 - [M5 validation](upgrade/m5_validation.md)

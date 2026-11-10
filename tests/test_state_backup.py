@@ -331,3 +331,106 @@ def test_synthetic_end_to_end_drill(tmp_path):
     assert result["ok"], result
     assert result["negative_cases_all_rejected"] and result["workdir_removed"]
     assert all(result["verified"].values()) and len(result["verified"]) == 2
+
+
+# ---------------------------------------------------------------- M6N synthetic browser drill
+
+@pytest.fixture
+def drill_home(tmp_path):
+    old = os.umask(0o077)
+    try:
+        home = tmp_path / "home"
+        home.mkdir(mode=0o700)
+        yield home
+    finally:
+        os.umask(old)
+
+
+def _rehearse(home):
+    drill = home / backup.DRILL_DIR_NAME
+    assert backup.drill_dir_problems(drill, home, ROOT, must_exist=False) == []
+    record = backup.rehearse_create(drill, PASS, now=T0, kdf=FAST)
+    return drill, record
+
+
+def test_rehearse_create_yields_one_labelled_ciphertext_and_no_plaintext(drill_home):
+    drill, record = _rehearse(drill_home)
+    outbox = list((drill / "backups/outbox").iterdir())
+    assert [p.name for p in outbox] == [record["file"]] == [Path(record["path"]).name]
+    assert record["file"].startswith("m6n-synthetic-drill-bootstrap-")
+    assert record["file"].endswith(".tfstate.enc")
+    assert not backup.NAME_RE.match(record["file"])  # real commands never accept drill files
+    assert not list((drill / "state").rglob("terraform.tfstate"))  # fixture plaintext removed
+    blob = outbox[0].read_bytes()
+    assert b"m6n-fixture" not in blob and b"lineage" not in blob
+    assert stat.S_IMODE(outbox[0].stat().st_mode) == 0o600
+    assert stat.S_IMODE(drill.stat().st_mode) == 0o700
+    assert "SYNTHETIC" in (drill / backup.DRILL_MARKER).read_text()
+    assert backup.drill_dir_problems(drill, drill_home, ROOT, must_exist=True) == []
+    ledger = (drill / backup.LEDGER).read_text()
+    assert PASS not in ledger and "m6n-fixture" in ledger  # synthetic lineage, no secret
+    with pytest.raises(FileExistsError):  # never reuses or overwrites a drill directory
+        backup.rehearse_create(drill, PASS, now=T0, kdf=FAST)
+
+
+def test_rehearse_round_trip_verifies_isolation_and_recovered_fixture(drill_home, tmp_path):
+    drill, record = _rehearse(drill_home)
+    downloads = tmp_path / "Downloads"
+    downloads.mkdir()
+    downloaded = downloads / record["file"]  # simulated browser upload + download
+    downloaded.write_bytes(Path(record["path"]).read_bytes())
+    report = backup.rehearse_verify(drill, downloaded, PASS, now=T0)
+    assert report["ok"], report
+    assert report["byte_identical_round_trip"] and report["cross_root_restore_rejected"]
+    assert report["wrong_passphrase_rejected"] and report["operator_passphrase_authenticated"]
+    assert all(v for k, v in report["recovered_fixture"].items() if k != "serial")
+    assert report["ledger_status"] == "verified"
+    evidence = Path(report["evidence_path"]).read_text()
+    assert PASS not in evidence and stat.S_IMODE(Path(report["evidence_path"]).stat().st_mode) \
+        == 0o600
+
+
+@pytest.mark.parametrize("case", ["wrong_passphrase", "corrupted", "renamed"])
+def test_rehearse_verify_fails_closed(drill_home, tmp_path, case):
+    drill, record = _rehearse(drill_home)
+    data = bytearray(Path(record["path"]).read_bytes())
+    name, passphrase = record["file"], PASS
+    if case == "wrong_passphrase":
+        passphrase = PASS + "!"
+    elif case == "corrupted":
+        data[-3] ^= 0x10
+    else:
+        name = name.replace(".tfstate.enc", " (1).tfstate.enc")  # browser duplicate naming
+    downloaded = tmp_path / name
+    downloaded.write_bytes(bytes(data))
+    report = backup.rehearse_verify(drill, downloaded, passphrase, now=T0, terraform=False)
+    assert report["ok"] is False
+    if case == "renamed":  # content is fine, but the exact-name rule must still fail
+        assert report["byte_identical_round_trip"] and not report["downloaded_name_matches"]
+    else:
+        assert report["ledger_status"] == "verify-failed"
+
+
+@pytest.mark.parametrize("where", ["repo", "custody", "desktop", "outside_home"])
+def test_drill_dir_must_be_disposable_and_separate(drill_home, tmp_path, where):
+    target = {"repo": ROOT / "m6n-onedrive-drill",
+              "custody": drill_home / ".secure" / "m6n-onedrive-drill",
+              "desktop": drill_home / "Desktop" / "m6n-onedrive-drill",
+              "outside_home": tmp_path / "elsewhere"}[where]
+    assert backup.drill_dir_problems(target, drill_home, ROOT, must_exist=False)
+
+
+def test_rehearse_create_cleans_up_if_encryption_fails(drill_home):
+    drill = drill_home / backup.DRILL_DIR_NAME
+    with pytest.raises(backup.BackupError, match="shorter"):
+        backup.rehearse_create(drill, "too-short", now=T0, kdf=FAST)
+    assert not drill.exists()  # no plaintext fixture left behind
+
+
+def test_rehearse_cli_refuses_inside_tooling(tmp_path):
+    for args in (["rehearse-create"], ["rehearse-verify", "--downloaded", "x"]):
+        result = subprocess.run([sys.executable, str(ROOT / "scripts/state_backup.py"), *args],
+                                capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                                env={**os.environ, "HOME": str(tmp_path), "CLAUDECODE": "1"})
+        assert result.returncode == 2 and "Claude Code session" in result.stderr
+    assert list(tmp_path.iterdir()) == []  # nothing created

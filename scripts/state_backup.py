@@ -17,6 +17,11 @@ Subcommands (real ones refuse to run inside a Claude Code session and need a TTY
   retention        Show which verified backups to keep and which may be deleted from OneDrive.
   mark-deleted     Record that an operator deleted a backup from OneDrive (refuses kept ones).
   drill            End-to-end rehearsal on disposable synthetic fixtures in a temporary fake home.
+  rehearse-create  M6N: operator-run. Encrypt a synthetic fixture under the operator's real backup
+                   passphrase into a disposable ~/m6n-onedrive-drill directory for a manual
+                   browser upload. No custody tree, backend or real state is used.
+  rehearse-verify  M6N: operator-run. Verify the file downloaded back from OneDrive: byte match,
+                   wrong-passphrase and cross-root rejection, recovered fixture, terraform show.
 """
 
 from __future__ import annotations
@@ -53,8 +58,12 @@ except ImportError:  # reported at use time with installation guidance
 MAGIC = b"M6MTFBK\x01"
 FORMAT = "m6m-tfstate-backup"
 SUFFIX = ".tfstate.enc"  # matched by .gitignore `*.tfstate.*` and the staged/stray guards
-NAME_RE = re.compile(r"^(?P<root>bootstrap|pilot-dev)-(?P<stamp>\d{8}T\d{6}Z)"
-                     r"-serial-(?P<serial>\d{6,})\.tfstate\.enc$")
+NAME_BODY = (r"(?P<root>bootstrap|pilot-dev)-(?P<stamp>\d{8}T\d{6}Z)"
+             r"-serial-(?P<serial>\d{6,})\.tfstate\.enc$")
+NAME_RE = re.compile("^" + NAME_BODY)  # real backups: anchored, so drill names never match
+DRILL_PREFIX = "m6n-synthetic-drill-"  # M6N synthetic browser drill files only
+DRILL_DIR_NAME = "m6n-onedrive-drill"
+DRILL_MARKER = "SYNTHETIC-DRILL-NOT-REAL-STATE.txt"
 STAMP = "%Y%m%dT%H%M%SZ"
 KDF_PRODUCTION = {"n": 2**17, "r": 8, "p": 1}  # 128 MiB, roughly 0.3-1 s per derivation
 KDF_LIMITS = {"n": (2**14, 2**18), "r": (8, 8), "p": (1, 1)}  # refuse weak or DoS parameters
@@ -179,14 +188,18 @@ def build_manifest(state_bytes: bytes, root: str, created: str, git_commit: str 
             "terraform_version": state.get("terraform_version"), "git_commit": git_commit}
 
 
-def backup_name(root: str, created: str, serial: int) -> str:
-    return f"{root}-{created}-serial-{serial:06d}{SUFFIX}"
+def name_pattern(prefix: str = "") -> re.Pattern:
+    return re.compile("^" + re.escape(prefix) + NAME_BODY)
+
+
+def backup_name(root: str, created: str, serial: int, prefix: str = "") -> str:
+    return f"{prefix}{root}-{created}-serial-{serial:06d}{SUFFIX}"
 
 
 def validate_restored(header: dict, manifest: dict, state_bytes: bytes, *, name: str,
-                      root: str) -> dict:
+                      root: str, prefix: str = "") -> dict:
     """Cross-check file name, authenticated header, manifest and restored state."""
-    match = NAME_RE.match(name)
+    match = name_pattern(prefix).match(name)
     state = parse_state(state_bytes)
     checks = {
         "name_format_ok": bool(match),
@@ -329,13 +342,14 @@ def _git_commit(repo: Path = custody.REPO) -> str | None:
 
 
 def create_backup(custody_root: Path, root: str, passphrase: str, *, now: datetime,
-                  kdf: dict | None = None, git_commit: str | None = None) -> dict:
+                  kdf: dict | None = None, git_commit: str | None = None,
+                  prefix: str = "") -> dict:
     """Encrypt the custody state for ``root`` into outbox/, verify it, record it."""
     state_path = custody_root / "state" / root / "terraform.tfstate"
     state_bytes = read_stable_state(state_path)
     created = now.strftime(STAMP)
     manifest = build_manifest(state_bytes, root, created, git_commit)
-    name = backup_name(root, created, manifest["serial"])
+    name = backup_name(root, created, manifest["serial"], prefix)
     prior = [r for r in backup_status(ledger_entries(custody_root)).values() if r["root"] == root]
     lineages = {r["lineage"] for r in prior if "lineage" in r}
     if lineages and manifest["lineage"] not in lineages:
@@ -362,10 +376,10 @@ def create_backup(custody_root: Path, root: str, passphrase: str, *, now: dateti
 
 
 def verify_download(custody_root: Path, root: str, name: str, passphrase: str, *,
-                    now: datetime, keep_plaintext: bool = False) -> dict:
+                    now: datetime, keep_plaintext: bool = False, prefix: str = "") -> dict:
     """Byte-compare a re-downloaded backup with the ledger, decrypt and validate it in a private
     recovery directory, then remove the plaintext unless ``keep_plaintext`` (approved recovery)."""
-    if not NAME_RE.match(name) or Path(name).name != name:
+    if not name_pattern(prefix).match(name) or Path(name).name != name:
         raise BackupError("file name is not an M6M backup name")
     downloaded = custody_root / "backups/inbox" / name
     if not downloaded.is_file() or downloaded.is_symlink():
@@ -389,7 +403,7 @@ def verify_download(custody_root: Path, root: str, name: str, passphrase: str, *
             custody.write_private(restored, state_bytes)
             try:
                 report.update(validate_restored(header, manifest, restored.read_bytes(),
-                                                name=name, root=root))
+                                                name=name, root=root, prefix=prefix))
             except BackupError as exc:
                 report.update(structure_ok=False, error=str(exc))
             report["restored_mode"] = oct(stat.S_IMODE(restored.stat().st_mode))
@@ -554,6 +568,146 @@ def run_drill(workdir: str | None = None, kdf: dict | None = None) -> dict:
     return results
 
 
+# ---------------------------------------------------------------- M6N synthetic browser drill
+# Disposable directory with the same internal layout as custody, so the production create and
+# verify code paths are exercised unchanged. It is not the custody tree and holds no real state.
+
+DRILL_ROOT = "bootstrap"  # the drill fixture's root; the cross-root check uses the other one
+DRILL_OTHER_ROOT = "pilot-dev"
+DRILL_MARKER_TEXT = (
+    "M6N SYNTHETIC ONEDRIVE DRILL. Contains only a fake Terraform state fixture with zero\n"
+    "resources and no credentials. Not the custody tree. Delete this directory after the drill.\n")
+
+
+def drill_dir_problems(drill_dir: Path, home: Path, repo: Path = custody.REPO, *,
+                       must_exist: bool) -> list[str]:
+    problems = custody.path_violations(drill_dir, home, repo)
+    if (home / ".secure") in drill_dir.resolve().parents or drill_dir.resolve() == home / ".secure":
+        problems.append("inside the custody area ~/.secure (drill must stay separate)")
+    if must_exist:
+        if not (drill_dir / DRILL_MARKER).is_file():
+            problems.append("not an M6N drill directory (marker missing; run rehearse-create)")
+        else:
+            for rel in ("", "state", f"state/{DRILL_ROOT}", "backups", *BACKUP_DIRS):
+                if (drill_dir / rel).is_dir():
+                    problems += custody.mode_problems(drill_dir / rel, True)
+                else:
+                    problems.append(f"missing drill directory {rel or '.'}")
+    elif drill_dir.exists():
+        problems.append("drill directory already exists (delete it or choose another path)")
+    return problems
+
+
+def drill_fixture() -> dict:
+    doc = fixture_state(DRILL_ROOT, 1, f"m6n-fixture-{DRILL_ROOT}-{uuid.uuid4()}")
+    doc["outputs"]["fixture_marker"]["value"] = (
+        "M6N synthetic OneDrive drill fixture; not real infrastructure")
+    return doc
+
+
+def rehearse_create(drill_dir: Path, passphrase: str, *, now: datetime,
+                    kdf: dict | None = None) -> dict:
+    """Create the drill directory, write a synthetic fixture, encrypt it with the production
+    code path, then delete the plaintext fixture (simulated loss). Returns non-secret metadata."""
+    drill_dir.mkdir(mode=0o700)  # exclusive: refuses an existing directory
+    os.chmod(drill_dir, 0o700)
+    (drill_dir / DRILL_MARKER).write_text(DRILL_MARKER_TEXT)
+    for rel in ("state", f"state/{DRILL_ROOT}", "backups", *BACKUP_DIRS):
+        (drill_dir / rel).mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(drill_dir / rel, 0o700)
+    state = drill_dir / "state" / DRILL_ROOT / "terraform.tfstate"
+    try:
+        custody.write_private(state, json.dumps(drill_fixture(), indent=2).encode())
+        record = create_backup(drill_dir, DRILL_ROOT, passphrase, now=now, kdf=kdf,
+                               git_commit=None, prefix=DRILL_PREFIX)
+    except BaseException:
+        shutil.rmtree(drill_dir, ignore_errors=True)  # created above by this call only
+        raise
+    state.unlink()  # only the ciphertext and the ledger hash remain
+    return {**record, "path": str(drill_dir / "backups/outbox" / record["file"])}
+
+
+def rehearse_verify(drill_dir: Path, downloaded: Path, passphrase: str, *, now: datetime,
+                    terraform: bool = True) -> dict:
+    """Verify the operator's browser round trip. Never prints or stores the passphrase."""
+    created = [r for r in backup_status(ledger_entries(drill_dir)).values()
+               if r.get("ciphertext_sha256")]
+    if len(created) != 1:
+        raise BackupError("drill ledger must contain exactly one created backup")
+    expected = created[0]
+    if downloaded.is_symlink() or not downloaded.is_file():
+        raise BackupError("downloaded file not found (or is a symlink)")
+    if downloaded.stat().st_size > MAX_STATE_BYTES:
+        raise BackupError("downloaded file is too large")
+    data = downloaded.read_bytes()
+    report: dict = {"file": expected["file"], "downloaded_name": downloaded.name,
+                    "downloaded_name_matches": downloaded.name == expected["file"],
+                    "size": len(data), "expected_size": expected.get("size"),
+                    "ciphertext_sha256": hashlib.sha256(data).hexdigest(),
+                    "byte_identical_round_trip":
+                        hashlib.sha256(data).hexdigest() == expected["ciphertext_sha256"]}
+    inbox = drill_dir / "backups/inbox" / expected["file"]
+    inbox.unlink(missing_ok=True)
+    custody.write_private(inbox, data)
+    other = verify_download(drill_dir, DRILL_OTHER_ROOT, expected["file"], passphrase, now=now,
+                            prefix=DRILL_PREFIX)
+    report["cross_root_restore_rejected"] = other["verified"] is False and \
+        other.get("root_ok") is False
+    wrong = verify_download(drill_dir, DRILL_ROOT, expected["file"], secrets.token_urlsafe(32),
+                            now=now, prefix=DRILL_PREFIX)
+    report["wrong_passphrase_rejected"] = wrong.get("authenticated") is False
+    final = verify_download(drill_dir, DRILL_ROOT, expected["file"], passphrase, now=now,
+                            keep_plaintext=True, prefix=DRILL_PREFIX)
+    report["operator_passphrase_authenticated"] = bool(final.get("authenticated"))
+    report["verify"] = {k: v for k, v in final.items() if k.endswith(("_ok", "_match"))
+                        or k in ("verified", "restored_mode")}
+    if final.get("recovery_dir"):
+        restored = Path(final["recovery_dir"]) / "terraform.tfstate"
+        doc = json.loads(restored.read_bytes())
+        report["recovered_fixture"] = {
+            "sha256_matches_ledger":
+                hashlib.sha256(restored.read_bytes()).hexdigest() == expected["state_sha256"],
+            "synthetic_lineage": doc["lineage"].startswith(f"m6n-fixture-{DRILL_ROOT}-"),
+            "zero_resources": doc["resources"] == [],
+            "marker": doc["outputs"]["fixture_marker"]["value"].startswith("M6N synthetic"),
+            "serial": doc["serial"]}
+        report["recovery_path"] = str(restored)
+        if terraform and shutil.which("terraform"):
+            empty = Path(tempfile.mkdtemp(prefix="tf-show-", dir=drill_dir / "recovery"))
+            show = subprocess.run(["terraform", f"-chdir={empty}", "show", "-json",
+                                   str(restored)], capture_output=True, text=True,
+                                  env={**os.environ, "TF_IN_AUTOMATION": "1",
+                                       "CHECKPOINT_DISABLE": "1"})
+            parsed = json.loads(show.stdout) if show.returncode == 0 else {}
+            report["terraform_show_parses"] = parsed.get("values", {}).get("outputs", {}) \
+                .get("fixture_marker", {}).get("value", "").startswith("M6N synthetic")
+            empty.rmdir()
+    report["ledger_status"] = backup_status(ledger_entries(drill_dir))[expected["file"]]["status"]
+    fixture = report.get("recovered_fixture", {})
+    report["ok"] = bool(report["byte_identical_round_trip"] and report["downloaded_name_matches"]
+                        and report["cross_root_restore_rejected"]
+                        and report["wrong_passphrase_rejected"]
+                        and report["operator_passphrase_authenticated"]
+                        and report["verify"].get("verified") and fixture
+                        and all(v for k, v in fixture.items() if k != "serial")
+                        and report.get("terraform_show_parses", True)
+                        and report["ledger_status"] == "verified")
+    evidence = drill_dir / f"evidence-{now.strftime(STAMP)}.json"
+    custody.write_private(evidence, json.dumps(report, indent=2).encode())
+    report["evidence_path"] = str(evidence)
+    return report
+
+
+def _operator_session(drill_dir: Path, *, must_exist: bool) -> None:
+    problems = refuse_unsafe_session(dict(os.environ), sys.stdin.isatty())
+    problems += drill_dir_problems(drill_dir, Path.home(), must_exist=must_exist)
+    if custody.filevault_for(Path.home()) is not True:
+        problems.append("FileVault not confirmed for the home volume")
+    if problems:
+        raise BackupError("; ".join(problems))
+    os.umask(0o077)
+
+
 # ---------------------------------------------------------------- CLI
 
 def _passphrase(confirm: bool) -> str:
@@ -591,9 +745,30 @@ def main(argv: list[str] | None = None) -> int:
     deleted.add_argument("--file", required=True)
     drill = sub.add_parser("drill")
     drill.add_argument("--workdir", default=None, help="Parent for the disposable directory")
+    default_drill = str(Path.home() / DRILL_DIR_NAME)
+    rehearse = sub.add_parser("rehearse-create")
+    rehearse.add_argument("--drill-dir", default=default_drill)
+    rverify = sub.add_parser("rehearse-verify")
+    rverify.add_argument("--drill-dir", default=default_drill)
+    rverify.add_argument("--downloaded", required=True,
+                         help="Path of the file downloaded back from OneDrive")
     args = parser.parse_args(argv)
     now = datetime.now(UTC).replace(microsecond=0)
     try:
+        if args.command == "rehearse-create":
+            drill_dir = Path(args.drill_dir).expanduser()
+            _operator_session(drill_dir, must_exist=False)
+            record = rehearse_create(drill_dir, _passphrase(confirm=True), now=now)
+            print(json.dumps({k: record[k] for k in ("path", "file", "size",
+                                                     "ciphertext_sha256")}, indent=2))
+            return 0
+        if args.command == "rehearse-verify":
+            drill_dir = Path(args.drill_dir).expanduser()
+            _operator_session(drill_dir, must_exist=True)
+            report = rehearse_verify(drill_dir, Path(args.downloaded).expanduser(),
+                                     _passphrase(confirm=False), now=now)
+            print(json.dumps(report, indent=2))
+            return 0 if report["ok"] else 1
         if args.command == "drill":
             result = run_drill(args.workdir)
             print(json.dumps(result, indent=2))
