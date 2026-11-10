@@ -52,6 +52,14 @@ FORBIDDEN_FLAGS = ("-state", "-state-out", "-backup", "-backend-config", "-backe
                    "-force-copy", "-chdir", "-destroy", "-from-module", "-plugin-dir",
                    "-upgrade", "-lockfile")
 SEPARATE_VALUE_FLAGS = ("-var-file", "-out")  # must use the -flag=value form
+# M6S: partial or drift-hiding plans. -target/-replace narrow or force changes outside the
+# reviewed configuration; -refresh-only adopts out-of-band changes into state. Refused in every
+# form (=value, separate value, bare, -- prefix, any case). -refresh is allowed only as true.
+PLAN_SCOPE_FLAGS = ("-target", "-replace", "-refresh-only")
+# Name prefixes refused too, so future variants (e.g. -target-file, -exclude in newer Terraform)
+# are refused before review rather than silently accepted.
+PLAN_SCOPE_PREFIXES = ("-target", "-replace", "-exclude", "-refresh-only")
+GO_TRUE = ("", "1", "t", "true")  # bare flag, then Go strconv.ParseBool true (lower-cased)
 FORBIDDEN_ENV_PREFIXES = ("TF_CLI_ARGS", "TF_CLI_CONFIG_FILE", "TF_STATE", "TF_PLUGIN_CACHE_DIR")
 
 # ---- M6P (P1): credential and provider-identity environment policy -------------------------
@@ -329,9 +337,15 @@ def build_command(root: str, args: list[str], home: Path, *,
     # Go's flag parser accepts -flag and --flag, and bool values such as FALSE, f and 0.
     rest = [("-" + a.lstrip("-")) if a.startswith("--") else a for a in rest]
     for arg in rest:
-        flag, _, value = arg.partition("=")
+        flag, sep, value = arg.partition("=")
         if flag == "-lock" and value.lower() not in ("", "true", "t", "1"):
             raise CustodyError("disabling state locking is not allowed")
+        name = flag.lower()
+        if name in PLAN_SCOPE_FLAGS or name.startswith(PLAN_SCOPE_PREFIXES):
+            raise CustodyError(f"flag {name} is not allowed (plans must cover the whole "
+                               "configuration with a normal refresh)")
+        if name == "-refresh" and sep and value.lower() not in GO_TRUE[1:]:
+            raise CustodyError("disabling refresh is not allowed (it hides out-of-band drift)")
         if flag in FORBIDDEN_FLAGS:
             raise CustodyError(f"flag {flag} is not allowed (custody controls state and backend)")
         if arg in SEPARATE_VALUE_FLAGS:

@@ -524,3 +524,104 @@ def test_bootstrap_instance_count_is_11_with_audit_and_without_access():
     assert (always, gated_access, gated_audit) == (10, 2, 1)
     assert always + gated_audit == 11  # first bootstrap: audit on, provisioner access off
     assert always + gated_audit + gated_access == 13  # later access window
+
+
+# ---------------------------------------------------------------- M6S plan-scope flags
+
+PLAN_SCOPE_BYPASSES = [
+    # -refresh=false in every Go bool spelling, dash form and case
+    "-refresh=false", "-refresh=FALSE", "-refresh=False", "-refresh=f", "-refresh=F",
+    "-refresh=0", "--refresh=false", "---refresh=false", "-REFRESH=false", "-Refresh=0",
+    "-refresh=", "-refresh=no", "-refresh=off",
+    # -target / -replace, =value, bare (separate value follows), double dash, case
+    "-target=google_service_account.runner", "-target", "--target=module.storage",
+    "-Target=x", "-TARGET=x", "-replace=google_service_account.runner", "-replace",
+    "--replace=x", "-REPLACE=x",
+    # refresh-only mode in any value, and future scoping variants
+    "-refresh-only", "--refresh-only", "-refresh-only=true", "-refresh-only=false",
+    "-target-file=targets.txt", "-exclude=module.bigquery", "--exclude=x",
+]
+
+
+@pytest.mark.parametrize("flag", PLAN_SCOPE_BYPASSES)
+@pytest.mark.parametrize("command", ["plan", "apply"])
+@pytest.mark.parametrize("position", ["first", "last", "after_separator"])
+def test_plan_scope_and_refresh_bypasses_are_refused(world, command, flag, position):
+    home, repo, _ = world
+    saved = str(home / custody.CUSTODY_ROOT / "plans" / "bootstrap" / "p.tfplan")
+    base = _plan_args(home)[1:] if command == "plan" else [saved]
+    extra = [flag, "x"] if flag in ("-target", "-replace") else [flag]
+    args = {"first": [*extra, *base], "last": [*base, *extra],
+            "after_separator": [*base, "--", *extra]}[position]
+    with pytest.raises(tc.CustodyError) as refused:
+        tc.build_command("bootstrap", [command, *args], home, repo=repo)
+    assert "not allowed" in str(refused.value)
+
+
+@pytest.mark.parametrize("command", ["init", "validate", "show", "state"])
+def test_scope_flags_are_refused_for_every_command(world, command):
+    home, repo, _ = world
+    head = [command, "list"] if command == "state" else [command]
+    for flag in ("-target=x", "-replace=x", "-refresh=false", "-refresh-only"):
+        with pytest.raises(tc.CustodyError):
+            tc.build_command("bootstrap", [*head, flag], home, repo=repo)
+
+
+@pytest.mark.parametrize("extra", [
+    [], ["-refresh"], ["-refresh=true"], ["-refresh=TRUE"], ["-refresh=True"], ["-refresh=t"],
+    ["-refresh=1"], ["--refresh=true"],
+    ["-var=note=-target=x"],  # a variable value, not a flag: Go assigns it to -var
+    ["-lock-timeout=60s"], ["-parallelism=5"], ["-lock=true"],
+])
+def test_normal_refresh_and_approved_plan_forms_still_work(world, extra):
+    home, repo, _ = world
+    c = home / custody.CUSTODY_ROOT
+    args = [*_plan_args(home), *extra,
+            f"-var-file={c / 'inputs' / 'bootstrap-dev-window.tfvars'}"]
+    argv, _ = tc.build_command("bootstrap", args, home, repo=repo)
+    # passed through unchanged (existing --flag -> -flag normalisation), nothing injected
+    assert argv[2:] == [("-" + a.lstrip("-")) if a.startswith("--") else a for a in args]
+    saved = str(c / "plans" / "bootstrap" / "p.tfplan")
+    assert tc.build_command("bootstrap", ["apply", saved], home, repo=repo)[0][2:] == [
+        "apply", saved]
+
+
+@pytest.mark.parametrize("var,value", [
+    ("TF_CLI_ARGS", "-refresh=false"), ("TF_CLI_ARGS_plan", "-target=x"),
+    ("TF_CLI_ARGS_apply", "-replace=x"), ("TF_CLI_ARGS_plan", "-refresh-only"),
+    ("TF_CLI_CONFIG_FILE", "/tmp/evil.tfrc"),
+])
+def test_injected_cli_environment_is_refused_and_never_reaches_terraform(
+        world, tmp_path, var, value):
+    home, repo, _ = world
+    _write_backend_caches(home)
+    fake = tmp_path / "fake-terraform"
+    ran = tmp_path / "ran"
+    fake.write_text(f'#!/bin/sh\ntouch "{ran}"\nexit 0\n')
+    fake.chmod(0o700)
+    env = {"HOME": str(home), "PATH": "/usr/bin:/bin", tc.TOKEN_VAR: FAKE_TOKEN, var: value}
+    assert any(p.startswith(var) for p in tc.environment_problems(env, home, "bootstrap"))
+    with pytest.raises(tc.CustodyError) as refused:
+        tc.run("bootstrap", _plan_args(home), home, env, repo=repo,
+               require_filevault=False, terraform=str(fake))
+    assert var in str(refused.value) and value not in str(refused.value)
+    assert not ran.exists()
+    assert var not in tc.child_environment(env, {}, "plan")  # second layer: allow-list
+
+
+def test_refused_flag_never_executes_terraform(world, tmp_path):
+    home, repo, _ = world
+    _write_backend_caches(home)
+    fake = tmp_path / "fake-terraform"
+    ran = tmp_path / "ran"
+    fake.write_text(f'#!/bin/sh\ntouch "{ran}"\nexit 0\n')
+    fake.chmod(0o700)
+    env = {"HOME": str(home), "PATH": "/usr/bin:/bin", tc.TOKEN_VAR: FAKE_TOKEN}
+    for flag in ("-refresh=false", "-target=x", "-replace=x", "-refresh-only"):
+        with pytest.raises(tc.CustodyError):
+            tc.run("bootstrap", [*_plan_args(home), flag], home, env, repo=repo,
+                   require_filevault=False, terraform=str(fake))
+    assert not ran.exists()
+    report = tc.run("bootstrap", [*_plan_args(home), "-refresh=true"], home, env, repo=repo,
+                    require_filevault=False, terraform=str(fake))
+    assert report["returncode"] == 0 and ran.exists()  # control: normal refresh executes
