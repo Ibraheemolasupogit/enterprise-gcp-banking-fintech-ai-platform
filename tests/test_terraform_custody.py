@@ -28,6 +28,9 @@ custody = tc.custody
 TERRAFORM = shutil.which("terraform")
 needs_terraform = pytest.mark.skipif(TERRAFORM is None, reason="terraform binary unavailable")
 BACKEND_RE = re.compile(r'backend\s+"(\w+)"\s*\{(.*?)\}', re.S)
+REAL_PROVIDER = {name: re.search(r'^provider "google" \{\n.*?^\}\n',
+                                 (ROOT / rel / "main.tf").read_text(), re.M | re.S).group(0)
+                 for name, rel in custody.ROOTS.items()}
 
 
 @pytest.fixture
@@ -37,9 +40,10 @@ def world(tmp_path):
     try:
         home, repo = tmp_path / "home", tmp_path / "repo"
         home.mkdir(mode=0o700)
-        for rel in custody.ROOTS.values():
+        for name, rel in custody.ROOTS.items():
             (repo / rel).mkdir(parents=True, exist_ok=True)
-            (repo / rel / "main.tf").write_text("terraform {\n" + tc.BACKEND_BLOCK + "}\n")
+            (repo / rel / "main.tf").write_text("terraform {\n" + tc.BACKEND_BLOCK + "}\n\n"
+                                                + REAL_PROVIDER[name])
         created = tc.create_custody_tree(home, repo)
         yield home, repo, created
     finally:
@@ -294,8 +298,12 @@ def test_real_backend_block_fails_closed_without_custody_config(tmp_path, varian
 
 
 @needs_terraform
-def test_wrapper_end_to_end_init_is_isolated_and_creates_no_state(world):
+def test_wrapper_end_to_end_init_is_isolated_and_creates_no_state(world, monkeypatch):
     home, repo, _ = world
+    # No provider blocks here, so init downloads nothing; provider checks are tested separately.
+    for rel in custody.ROOTS.values():
+        (repo / rel / "main.tf").write_text("terraform {\n" + tc.BACKEND_BLOCK + "}\n")
+    monkeypatch.setattr(tc, "provider_problems", lambda root, repo: [])
     for root in custody.ROOTS:
         report = tc.run(root, ["init"], home, {}, repo=repo, require_filevault=False,
                         terraform=TERRAFORM)
@@ -318,3 +326,201 @@ def test_wrapper_end_to_end_init_is_isolated_and_creates_no_state(world):
     cache.write_text(json.dumps(doc))
     for root in custody.ROOTS:  # both roots refuse until the contamination is resolved
         assert any("bootstrap" in p for p in _pre(home, repo, root, phase="run"))
+
+
+# ---------------------------------------------------------------- M6P P1: credential inheritance
+# Synthetic token assembled at runtime so no token-shaped literal exists in this file.
+FAKE_TOKEN = "ya29" + "." + "SyntheticTestTokenNotReal_" + "x" * 24
+BASE_ENV = {"HOME": "/nonexistent-home", "PATH": "/usr/bin:/bin"}
+
+
+def _plan_args(home, root="bootstrap"):
+    c = home / custody.CUSTODY_ROOT
+    return ["plan", "-input=false", f"-var-file={c / 'inputs' / f'{root}-dev.tfvars'}",
+            f"-out={c / 'plans' / root / 'p.tfplan'}"]
+
+
+def _write_backend_caches(home):
+    for root in custody.ROOTS:
+        want = custody.expected_backend(home, root)
+        cache = {"version": 3, "backend": {"type": "local", "config": {
+            "path": str(want["path"]), "workspace_dir": str(want["workspace_dir"])}}}
+        custody.write_private(want["tf_data_dir"] / "terraform.tfstate",
+                              json.dumps(cache).encode())
+
+
+def _cred(home, env, command):
+    return tc.credential_problems(env, home, command)
+
+
+@pytest.mark.parametrize("var", [
+    "GOOGLE_IMPERSONATE_SERVICE_ACCOUNT", "GOOGLE_CREDENTIALS", "GOOGLE_APPLICATION_CREDENTIALS",
+    "GOOGLE_CLOUD_KEYFILE_JSON", "GCLOUD_KEYFILE_JSON", "GOOGLE_BILLING_PROJECT",
+    "USER_PROJECT_OVERRIDE", "GOOGLE_CLOUD_QUOTA_PROJECT", "GOOGLE_PROJECT",
+    "GOOGLE_USE_DEFAULT_CREDENTIALS", "CLOUDSDK_CONFIG", "CLOUDSDK_AUTH_ACCESS_TOKEN_FILE",
+    "CLOUDSDK_CORE_PROJECT", "GCE_METADATA_HOST", "GCE_METADATA_IP", "HTTPS_PROXY",
+    "https_proxy", "ALL_PROXY", "SSL_CERT_FILE"])
+@pytest.mark.parametrize("command", ["plan", "apply", "init", "validate", None])
+def test_credential_and_override_variables_are_refused(tmp_path, var, command):
+    env = {**BASE_ENV, var: "attacker-controlled"}
+    if command in tc.NETWORK_COMMANDS:
+        env[tc.TOKEN_VAR] = FAKE_TOKEN
+    problems = _cred(tmp_path, env, command)
+    assert any(p.startswith(var + " is set") for p in problems), problems
+    assert all(FAKE_TOKEN not in p and "attacker-controlled" not in p for p in problems)
+
+
+@pytest.mark.parametrize("command", ["plan", "apply"])
+def test_network_commands_require_a_wellformed_token(tmp_path, command):
+    assert _cred(tmp_path, {**BASE_ENV, tc.TOKEN_VAR: FAKE_TOKEN}, command) == []
+    assert any("is required" in p for p in _cred(tmp_path, BASE_ENV, command))
+    bad = "not-a-token " + FAKE_TOKEN  # whitespace/prefix: malformed
+    problems = _cred(tmp_path, {**BASE_ENV, tc.TOKEN_VAR: bad}, command)
+    assert problems == [f"{tc.TOKEN_VAR} is malformed (value not shown)"]
+
+
+@pytest.mark.parametrize("command", ["init", "validate", "show", "output", "state", "version"])
+def test_offline_commands_refuse_a_token(tmp_path, command):
+    assert _cred(tmp_path, BASE_ENV, command) == []
+    assert any("offline command" in p for p in
+               _cred(tmp_path, {**BASE_ENV, tc.TOKEN_VAR: FAKE_TOKEN}, command))
+
+
+def test_token_runs_refuse_tf_log_adc_and_cli_config(tmp_path):
+    env = {**BASE_ENV, tc.TOKEN_VAR: FAKE_TOKEN}
+    assert any("TF_LOG" in p for p in _cred(tmp_path, {**env, "TF_LOG": "DEBUG"}, "plan"))
+    adc = tmp_path / tc.ADC_PATH
+    adc.parent.mkdir(parents=True)
+    adc.write_text("{}")
+    assert any("ADC file" in p for p in _cred(tmp_path, env, "plan"))
+    assert not any("ADC file" in p for p in _cred(tmp_path, BASE_ENV, "validate"))
+    for rel in tc.CLI_CONFIG_PATHS:
+        home = tmp_path / ("h-" + rel.replace("/", "_"))
+        (home / rel).parent.mkdir(parents=True, exist_ok=True)
+        (home / rel).mkdir() if rel.endswith("plugins") else (home / rel).write_text("")
+        assert any(rel in p for p in _cred(home, BASE_ENV, "validate")), rel
+
+
+@pytest.mark.parametrize("change", [
+    "bootstrap:impersonate_service_account", "bootstrap:credentials", "bootstrap:access_token",
+    "bootstrap:billing_project", "bootstrap:user_project_override",
+    "bootstrap:impersonate_service_account_delegates", "bootstrap:second_block_other_file",
+    "bootstrap:override_file", "bootstrap:json_file", "pilot-dev:no_impersonation",
+    "pilot-dev:other_impersonation", "pilot-dev:credentials", "pilot-dev:module_provider"])
+def test_provider_identity_tampering_is_refused(world, change):
+    home, repo, _ = world
+    root, what = change.split(":")
+    root_dir = repo / custody.ROOTS[root]
+    main = root_dir / "main.tf"
+    text = main.read_text()
+    assert tc.provider_problems(root, repo) == []
+    if what == "second_block_other_file":
+        (root_dir / "providers.tf").write_text(
+            'provider "google" {\n  alias   = "x"\n  project = "p"\n}\n')
+    elif what == "override_file":
+        (root_dir / "bootstrap_override.tf").write_text(
+            'provider "google" {\n  impersonate_service_account = "sa@p.iam"\n}\n')
+    elif what == "json_file":
+        (root_dir / "extra.tf.json").write_text("{}")
+    elif what == "no_impersonation":
+        main.write_text(re.sub(r"^\s*impersonate_service_account.*\n", "", text, flags=re.M))
+    elif what == "other_impersonation":
+        main.write_text(text.replace("var.provisioner_service_account", "var.runner_account"))
+    elif what == "module_provider":
+        (root_dir / "modules" / "m").mkdir(parents=True)
+        (root_dir / "modules" / "m" / "main.tf").write_text('provider "google" {\n}\n')
+    else:
+        attr = what
+        main.write_text(text.replace('provider "google" {\n',
+                                     f'provider "google" {{\n  {attr} = "x"\n', 1))
+    assert tc.provider_problems(root, repo), change
+    assert _pre(home, repo, root), change  # and the preflight refuses
+
+
+def test_child_environment_is_an_explicit_allow_list():
+    env = {**BASE_ENV, tc.TOKEN_VAR: FAKE_TOKEN, "EDITOR": "vi", "AWS_SECRET_ACCESS_KEY": "s",
+           "TF_LOG": "INFO", "TF_DATA_DIR": "/elsewhere", "TF_WORKSPACE": "dev"}
+    overrides = {"TF_DATA_DIR": "/custody/tfdata/bootstrap", "CHECKPOINT_DISABLE": "1"}
+    plan = tc.child_environment(env, overrides, "plan")
+    assert plan[tc.TOKEN_VAR] == FAKE_TOKEN and plan["TF_DATA_DIR"] == overrides["TF_DATA_DIR"]
+    assert set(plan) <= {*tc.CHILD_BASE_ENV, *tc.CHILD_TF_ENV, *overrides, tc.TOKEN_VAR}
+    assert "EDITOR" not in plan and "AWS_SECRET_ACCESS_KEY" not in plan
+    assert "TF_WORKSPACE" not in plan
+    assert tc.TOKEN_VAR not in tc.child_environment(env, overrides, "validate")
+
+
+def test_dry_run_report_redacts_the_token(world):
+    home, repo, _ = world
+    _write_backend_caches(home)
+    env = {**BASE_ENV, "HOME": str(home), tc.TOKEN_VAR: FAKE_TOKEN}
+    report = tc.run("bootstrap", _plan_args(home), home, env, repo=repo,
+                    require_filevault=False, dry_run=True)
+    dumped = json.dumps(report)
+    assert FAKE_TOKEN not in dumped and report["preflight_problems"] == []
+    assert report["credential_env"] == [f"{tc.TOKEN_VAR}=<redacted>"]
+    with pytest.raises(tc.CustodyError) as refused:  # refusal text never carries the value
+        tc.run("bootstrap", _plan_args(home), home,
+               {**env, "GOOGLE_IMPERSONATE_SERVICE_ACCOUNT": "sa@p.iam.gserviceaccount.com"},
+               repo=repo, require_filevault=False, dry_run=True)
+    assert "GOOGLE_IMPERSONATE_SERVICE_ACCOUNT" in str(refused.value)
+    assert FAKE_TOKEN not in str(refused.value)
+
+
+def test_cli_refusal_never_prints_token(tmp_path):
+    env = {"HOME": str(tmp_path), "PATH": os.environ["PATH"], tc.TOKEN_VAR: FAKE_TOKEN,
+           "GOOGLE_IMPERSONATE_SERVICE_ACCOUNT": "sa@p.iam.gserviceaccount.com"}
+    result = subprocess.run([sys.executable, str(ROOT / "scripts/terraform_custody.py"), "run",
+                             "--root", "bootstrap", "--dry-run", "--", *_plan_args(tmp_path)],
+                            capture_output=True, text=True, env=env)
+    assert result.returncode == 2 and "GOOGLE_IMPERSONATE_SERVICE_ACCOUNT" in result.stderr
+    assert FAKE_TOKEN not in result.stderr + result.stdout
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("root", sorted(custody.ROOTS))
+def test_approved_token_flow_executes_with_sanitised_environment(world, tmp_path, root):
+    """Approved operator flow, offline: a fake terraform records the environment it receives.
+    No real Terraform, plan or Google API call is involved."""
+    home, repo, _ = world
+    _write_backend_caches(home)
+    dump = tmp_path / f"env-{root}.txt"
+    fake = tmp_path / "fake-terraform"
+    fake.write_text(f'#!/bin/sh\nenv > "{dump}"\nexit 0\n')
+    fake.chmod(0o700)
+    env = {"HOME": str(home), "PATH": "/usr/bin:/bin", "TERM": "xterm",
+           tc.TOKEN_VAR: FAKE_TOKEN, "EDITOR": "vi"}
+    report = tc.run(root, _plan_args(home, root), home, env, repo=repo,
+                    require_filevault=False, terraform=str(fake))
+    assert report["returncode"] == 0 and report["post_problems"] == []
+    assert FAKE_TOKEN not in json.dumps(report)
+    child = dict(line.split("=", 1) for line in dump.read_text().splitlines() if "=" in line)
+    assert child[tc.TOKEN_VAR] == FAKE_TOKEN  # the approved credential, and only it
+    assert not [k for k in child if k.startswith(tc.CREDENTIAL_ENV_PREFIXES)
+                and k != tc.TOKEN_VAR]
+    assert child["TF_DATA_DIR"] == str(custody.expected_backend(home, root)["tf_data_dir"])
+    assert child["CHECKPOINT_DISABLE"] == "1" and "EDITOR" not in child
+    # Offline command in the same world: no token passed, and none required.
+    dump.unlink()
+    offline = tc.run(root, ["validate"], home, {k: v for k, v in env.items()
+                                                 if k != tc.TOKEN_VAR},
+                     repo=repo, require_filevault=False, terraform=str(fake))
+    assert offline["returncode"] == 0 and tc.TOKEN_VAR not in dump.read_text()
+
+
+def test_bootstrap_instance_count_is_11_with_audit_and_without_access():
+    text = (ROOT / custody.ROOTS["bootstrap"] / "main.tf").read_text()
+    runtime = json.loads((ROOT / "infrastructure/iam/runtime_roles.json").read_text())
+    always = gated_access = gated_audit = 0
+    for kind, name in re.findall(r'^resource "(\w+)" "(\w+)"', text, re.M):
+        body = text[text.index(f'resource "{kind}" "{name}"'):].split("\n}\n", 1)[0]
+        if "for_each" in body:
+            always += len(runtime)
+        elif re.search(r"count\s+= local\.access_count", body):
+            gated_access += 1
+        elif "token_audit_logging_enabled" in body:
+            gated_audit += 1
+        else:
+            always += 1
+    assert (always, gated_access, gated_audit) == (10, 2, 1)
+    assert always + gated_audit == 11  # first bootstrap: audit on, provisioner access off
+    assert always + gated_audit + gated_access == 13  # later access window

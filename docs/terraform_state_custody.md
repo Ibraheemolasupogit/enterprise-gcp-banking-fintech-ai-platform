@@ -115,6 +115,12 @@ M6L's concern that a sentinel "would fail only after cloud changes" applied to a
 - **root isolation:** either root's backend cache points at a path other than its own custody paths;
 - **repository artefacts:** **any** state, plan, lock or workspace artefact under the repository;
 - **backend block:** this root lacks the sentinel backend block;
+- **credentials (M6P P1):**
+  - any `GOOGLE_*` other than `GOOGLE_OAUTH_ACCESS_TOKEN`, any `CLOUDSDK_*`/`GCLOUD_*`/`GCE_METADATA_*`, `USER_PROJECT_OVERRIDE`, proxy or TLS-root variable is set;
+  - the token is missing or malformed for `plan`/`apply`, or present for an offline command;
+  - `TF_LOG` is set, or an ADC file exists, during a token run;
+  - Terraform CLI configuration or plugin directories exist;
+  - the provider blocks deviate from the identity design;
 - **FileVault** is not confirmed;
 - **run phase only:** the backend cache is missing or not local, or its `path`/`workspace_dir` are not the exact custody paths.
 
