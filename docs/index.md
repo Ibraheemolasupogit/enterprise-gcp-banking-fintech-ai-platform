@@ -73,4 +73,5 @@ Use this index to navigate the project documentation.
 - [M6O secure local Terraform backends](upgrade/m6o_validation.md)
 - [M6P IAM bootstrap security review](upgrade/m6p_validation.md)
 - [M6Q bootstrap audit-config recovery](upgrade/m6q_validation.md)
+- [M6R post-bootstrap GCP security verification](upgrade/m6r_validation.md)
 - [M5 validation](upgrade/m5_validation.md)
