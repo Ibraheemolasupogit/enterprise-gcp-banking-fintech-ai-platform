@@ -106,7 +106,7 @@ Key architecture documents:
 | Monitoring and drift outputs | Vertex AI Model Monitoring concept, Cloud Logging, BigQuery monitoring tables |
 | Governance evidence pack | Cloud Storage evidence bucket, BigQuery audit tables, Dataplex-style metadata |
 
-No live GCP infrastructure is deployed by this repository.
+This mapping is a target design. Only a small dev pilot (one Storage bucket and one BigQuery dataset with seven **empty** tables) has been deployed, by the operator; see [M6 GCP pilot status](#m6-gcp-pilot-status). None of the other services listed is deployed.
 
 ## Local Quickstart
 
@@ -250,7 +250,7 @@ All datasets and outputs are synthetic demonstration artifacts. They must not be
 
 ## Non-Production Disclaimer
 
-This repository is not production deployment. It does not create cloud infrastructure, service accounts, credentials, APIs, BigQuery tables, Pub/Sub topics, Dataflow jobs, Vertex AI pipelines, dashboards, model registry integrations, or live monitoring services.
+This repository is not production deployment. Its local workflows do not create cloud infrastructure, service accounts, credentials, APIs, BigQuery tables, Pub/Sub topics, Dataflow jobs, Vertex AI pipelines, dashboards, model registry integrations, or live monitoring services. The only cloud resources are the small M6 dev pilot that the operator applied manually through approval gates: the IAM bootstrap, one Storage bucket, one BigQuery dataset and seven **empty** tables. No data has been loaded into it and no workload runs there (see [GCP pilot status](#m6-gcp-pilot-status)).
 
 ## Limitations
 
@@ -258,7 +258,7 @@ This repository is not production deployment. It does not create cloud infrastru
 - Model metrics are demonstration metrics and not evidence of production suitability.
 - Rule-based AML, network, and NLP logic is intentionally transparent and lightweight.
 - Monitoring is local and file-based, not a live operational service.
-- GCP alignment is documented as architecture and deployment planning only.
+- GCP alignment is mostly architecture and deployment planning. The deployed dev pilot holds empty tables only; there is no cloud data ingestion, cloud workload or production hardening.
 - Human investigation, validation, governance approval, and compliance review would be required before any production use.
 
 ## Future Enhancements
@@ -282,6 +282,19 @@ Four versioned SQLite daily marts cover observed transaction, customer, account 
 
 ### M5 GCP deployment readiness
 
-Reviewable modular Terraform proposes one regional versioned Storage bucket, one BigQuery dataset/seven tables and scoped runtime IAM. [Design and limitations](docs/gcp_deployment_readiness.md), [approval gates](docs/gcp_pilot_plan.md), and [validation evidence](docs/upgrade/m5_validation.md) distinguish offline checks from outstanding provider/cloud verification. No GCP deployment has occurred.
+Reviewable modular Terraform proposes one regional versioned Storage bucket, one BigQuery dataset/seven tables and scoped runtime IAM. [Design and limitations](docs/gcp_deployment_readiness.md), [approval gates](docs/gcp_pilot_plan.md), and [validation evidence](docs/upgrade/m5_validation.md) distinguish offline checks from outstanding provider/cloud verification. M5 itself deployed nothing; the pilot was deployed later, in M6 (below).
 
 M5 also provides separate provisioning/cleanup permission candidates and environment examples, plus an offline seven-table export comparator. Run `make gcp-offline-check` with existing tooling; it performs no downloads or cloud operations. Export comparison instructions and remaining migration gaps are in the readiness design. M1–M4 interfaces and the 43 historical sample artifacts remain preserved.
+
+### M6 GCP pilot status
+
+M6 took the M5 design through gated, operator-run deployment in the dedicated dev project (`europe-west2`). Every cloud and Terraform step was run by the operator under separate approval; the assistant worked offline. As of **M6T, closed on 2026-11-12** ([evidence](docs/upgrade/m6t_validation.md)):
+
+- the IAM bootstrap root is applied ([M6Q](docs/upgrade/m6q_validation.md), [M6R](docs/upgrade/m6r_validation.md));
+- **all 18 pilot resources are deployed**: the bucket, the dataset and its two-entry access policy (named owner and runner metadata role), seven **empty** tables and their runner grants;
+- the temporary provisioner access was revoked and impersonation was confirmed denied;
+- encrypted pilot and bootstrap state backups were verified after a OneDrive round-trip.
+
+**This is not production readiness and not cloud data ingestion.** No object has been uploaded, no load or query job has run, and the [outstanding limitations](docs/upgrade/m6t_validation.md#outstanding-limitations) still apply.
+
+**Next: M7**, offline preparation for a controlled synthetic GCS-to-BigQuery ingestion. Any actual upload or load needs its own approved access window.

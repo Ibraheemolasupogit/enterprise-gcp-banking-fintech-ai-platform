@@ -1,6 +1,8 @@
 # GCP Service Mapping
 
-This table maps the local repository artifacts to a target GCP service design. It is a reference architecture artifact only; no live GCP infrastructure is deployed by this repository.
+This table maps the local repository artifacts to a target GCP service design. It is a reference architecture artifact, not a statement of what is deployed.
+
+**Deployment status (M6T, operator-reported):** only a dev pilot's **infrastructure** exists: one Cloud Storage bucket and one BigQuery dataset with seven **empty** tables, plus their scoped IAM ([M6T](upgrade/m6t_validation.md)). No workload in this table has been executed in GCP: no ingestion or loading, no BigQuery analytics, no Dataflow, Vertex AI, Cloud Run, Pub/Sub, Looker Studio or monitoring service, and no production operation.
 
 | Local artifact | Local module/script | Target GCP service | Production responsibility | Governance/audit consideration |
 | --- | --- | --- | --- | --- |

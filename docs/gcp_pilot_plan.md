@@ -1,16 +1,24 @@
 # Controlled synthetic GCP pilot approval checklist
 
-This runbook governs future pilot infrastructure/workload operations. M6G authorizes evidence updates and offline checks only. The user reports the following facts verified through Google Cloud Console; they were not independently queried by the assistant in M6G. Earlier M5–M6E records remain historical evidence.
+This runbook governs pilot infrastructure/workload operations. All cloud and Terraform steps are run by the operator under separate approvals; the assistant works offline. The status below is **operator-reported** and was last updated at the M6T closure (2026-11-12). Earlier M5–M6S records remain historical evidence.
 
-| Prerequisite | Current status / source |
+## Current status (M6T closure)
+
+| Gate / item | Status / source |
 | --- | --- |
-| Dedicated project | `ebank-pilot-dev-261031-k7m4`, number `203569506404` — user Console-verified |
+| Dedicated project | `ebank-pilot-dev-261031-k7m4`, number `203569506404` — user Console-verified (M6G) |
 | Parent / billing link | No organization; linked existing GBP billing account — user Console-verified |
-| Monthly project alert budget | `Enterprise Banking AI Pilot - Dev`, **£5**, **50%, 80%, 100%** thresholds — user Console-verified |
+| Monthly project alert budget | `Enterprise Banking AI Pilot - Dev`, **£5**, **50%, 80%, 100%** thresholds — user Console-verified. Alerts are not caps |
 | Existing portfolio budget | Unchanged — user Console-verified; protected from pilot changes |
-| Workload location | `europe-west2` intended; no regional bucket/dataset deployment is established by this confirmation |
-| Provider preparation | M6A initialized/validated Google 7.31.0 and preserved the lockfile; no plan/apply evidenced |
-| Remaining prerequisites | New-project effective IAM/API/quota/inventory checks, provisioner/bootstrap, secure state and source authentication, exact resource inputs and saved plan — pending |
+| Location | `europe-west2`; the pilot bucket and dataset are deployed there |
+| Gate A: bootstrap, state custody, saved plans | **Complete.** IAM bootstrap applied and verified ([M6Q](upgrade/m6q_validation.md), [M6R](upgrade/m6r_validation.md)); local backends and encrypted OneDrive backups in use ([M6L](upgrade/m6l_validation.md)–[M6O](upgrade/m6o_validation.md)) |
+| Gate B: infrastructure | **Complete.** All **18 pilot resources deployed**: 17 in M6S, and the dataset IAM policy in the M6T recovery (1 created, 0 changed, 0 destroyed). Dataset access read back as named user OWNER plus the runner's metadata role only ([M6T](upgrade/m6t_validation.md)) |
+| Provisioner access | **Revoked** (2 grants destroyed); impersonation denied afterwards; temporary access-window input removed |
+| State backups | Pilot serial 21 and bootstrap serial 26, encrypted and verified after a OneDrive round-trip |
+| Gate C: synthetic workload | **Not started.** Tables are empty; no upload, load or query. M7 prepares it offline |
+| Gate D: cleanup | Not started; resources remain under deletion protection |
+
+Open limitations, including the unmapped numeric service-account identity in the 8 `GenerateAccessToken` audit entries, are listed in [M6T](upgrade/m6t_validation.md#outstanding-limitations). **This pilot is not production-ready and performs no cloud data ingestion.**
 
 Project creation, billing linkage and budget creation are **already reported complete**; do not request or repeat those operations. Approval for completed Console actions does not authorize API activation, IAM/bootstrap, state preparation, planning, apply or workloads. See [M6G source boundaries and next gate](upgrade/m6g_validation.md). No infrastructure/workload command in this runbook was executed by the assistant as part of M6G.
 
@@ -20,7 +28,7 @@ Use the Console-verified project/number above and intended `europe-west2`. Remai
 
 Use Terraform >=1.9 and inspect both environment examples. Base prefix is now environment-independent; the resulting account/role namespace includes `dev` or `test`. Require fresh names and separate state for each environment. From M6K, identity prerequisites come from the separate bootstrap root (`infrastructure/terraform/bootstrap/`, its own state, run by the bootstrap administrator without impersonating the provisioner). `provisioner.role.json` has no project IAM-write or custom-role administration; its remaining resource IAM writes are documented escalation paths. `cleanup.role.json` is an independent Gate D add-on. Record every approved bootstrap grant and its expiration; nothing is applied automatically. Missing permissions must return to review rather than triggering a broad predefined role grant.
 
-M6A completed provider initialization/validation and lockfile generation; no routine provider download/upgrade approval is needed again. After separate state/backend and source-authentication approval, prepare exact ignored inputs and rerun validation if configuration changes. M6D's proposed local state path requires an explicit local backend before use. Saved-plan generation still requires its own approval; no plan has been run. Audit provisioning permissions against the approved named operations; stop on missing permissions instead of widening roles automatically.
+M6A completed provider initialization/validation and lockfile generation; no routine provider download/upgrade approval is needed again. After separate state/backend and source-authentication approval, prepare exact ignored inputs and rerun validation if configuration changes. M6D's proposed local state path requires an explicit local backend before use. Each saved plan still requires its own approval. (Bootstrap and pilot plans have since been generated, approved and applied by the operator; see the status table above.) Audit provisioning permissions against the approved named operations; stop on missing permissions instead of widening roles automatically.
 
 Review the complete plan and `terraform show -json` output. Expect one bucket, one dataset, seven empty typed tables, two authoritative resource policies and seven table-role members (**18 pilot resource instances**). The runtime account, five runtime roles and project jobs member are **bootstrap** instances (bootstrap total: 10 core instances, or 12 while provisioner access is enabled, plus 1 IAM Credentials audit config when enabled, the default: 11 / 13; see [M6P](upgrade/m6p_validation.md)). Pilot plans must contain no service-account, custom-role or project IAM resources, and must pass the identity postconditions. There must be no project creation, billing changes, API activation, replacement/destruction, downloads of data, extra services or credentials. Resource IAM policies may only target new dedicated resources. Verify all labels, schemas, locations, deletion guards, bucket versioning/soft-delete and full IAM diffs. Store plan binary/hash, Terraform/provider versions and lock checksum privately. Do not publish raw state or access tokens.
 

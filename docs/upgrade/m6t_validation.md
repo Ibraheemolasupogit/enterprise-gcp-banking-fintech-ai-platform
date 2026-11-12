@@ -2,7 +2,9 @@
 
 Date 2026-11-10. Baseline `main` at `dba6d0c`. Project `ebank-pilot-dev-261031-k7m4`, region `europe-west2`.
 
-**Offline implementation only. The pilot deployment is NOT complete:** 17 of 18 resources exist, and the dataset IAM policy has not been applied. M6T did none of the following:
+**Status (closed 2026-11-12): M6T is complete.** The operator applied the recovery on 2026-11-10. **All 18 pilot resources are deployed** and the temporary access has been revoked. See [Operational closure](#operational-closure-operator-verified-2026-11-10) for the evidence and the limitations that remain. The pilot holds **empty tables only**. No data has been loaded, no workload has run, and nothing here claims production readiness.
+
+The sections from the incident up to the closure record the offline implementation **as it stood before the recovery**, when 17 of 18 resources existed. They are kept as historical evidence. The assistant's M6T work, including this closure update, did none of the following:
 - call gcloud or any cloud API;
 - run Terraform `init`, `plan`, `apply`, `state` or `refresh`;
 - read or modify custody files, private tfvars, state, saved plans, backups or OneDrive;
@@ -331,7 +333,9 @@ The pilot-recovery requirements are unchanged: one dataset-policy create, 17 no-
 
 **Rollback:** never `destroy` the dataset policy. An empty authoritative policy would also have no owner, and the wrapper refuses `destroy` anyway. Roll back with a reviewed corrected policy, or by owner correction in the Console. Serial 19 is the pre-recovery restore point.
 
-## Residual risks
+## Residual risks (pre-recovery, historical)
+
+These were the risks before the recovery. Items 1 and 2 were resolved by the live result; see [Operational closure](#operational-closure-operator-verified-2026-11-10).
 
 1. **Unresolved live verification:**
    - whether `roles/bigquery.dataOwner` set through the provider's dataset IAM path satisfies BigQuery's direct-owner requirement (expected: the provider maps it to dataset `OWNER`);
@@ -344,4 +348,67 @@ The pilot-recovery requirements are unchanged: one dataset-policy create, 17 no-
 5. **Checker trust:** the checker relies on the `--dataset-owner` string. The approval record above fixes it, and the checker also requires the plan variable to match.
 6. **Carried over:** wrapper bypass, text-based checks, an unrestricted Owner (P8).
 
-**Stopped after M6T implementation.** The deployment is incomplete (17 of 18). Next: G2.
+At the time of implementation the deployment was incomplete (17 of 18), and the next gate was G2. Both are superseded by the closure below.
+
+## Operational closure (operator-verified 2026-11-10)
+
+Everything in this section was **performed and reported by the operator**; the assistant did not observe it. This update was written offline on 2026-11-12, with no cloud, Terraform, IAM or custody-file access.
+
+### Gate outcomes
+
+| Gate | Evidence reported by the operator | Result |
+| --- | --- | --- |
+| G2 | Commit `96b51d7` on `main`; GitHub CI successful | Passed |
+| G5, recovery apply | Saved recovery plan applied: **1 BigQuery dataset IAM policy created, 0 changed, 0 destroyed** | Passed |
+| Pilot inventory | **All 18 pilot Terraform resources deployed**: bucket and bucket policy; dataset `bankpilot_dev` and its policy; 7 tables; 7 runner table grants | Complete |
+| G6, dataset access read-back | Only the **named user as OWNER** and the **runner with the custom metadata role**. No provisioner creator OWNER and no special-group defaults | Passed |
+| G7, revoke | Bootstrap-root revoke apply: **2 destroyed**, both successfully: `google_project_iam_member.provisioner[0]` (the expiring provisioner role grant) and `google_service_account_iam_member.operator_impersonation[0]` (the operator's token-minting grant on the provisioner). A subsequent live IAM read-back confirmed **both are absent** | Passed |
+| Post-revocation check | Impersonation of the provisioner **denied** | Passed |
+| Audit | **8 successful `GenerateAccessToken` IAM Credentials audit events** observed during the access window | Observed; target identity not mapped (limitation 1) |
+| Pilot state backup | Encrypted backup at **serial 21** authenticated and verified after a OneDrive round-trip | Verified |
+| Bootstrap state backup | Encrypted backup at **serial 26** authenticated and verified after a OneDrive round-trip | Verified |
+| Access-window input | The temporary access-window input was removed | Done |
+
+### Pre-recovery risks resolved by the live result
+
+- **Direct ownership:** `roles/bigquery.dataOwner` set through the provider's dataset IAM policy **satisfied** BigQuery's direct-owner requirement; the read-back shows the named user as `OWNER`.
+- **Custom role:** BigQuery **accepted** the custom metadata role in dataset access.
+- **Dormant creator OWNER:** the provisioner's creation-default OWNER entry was **removed** by the authoritative policy.
+- **Audit event generation ([M6R](m6r_validation.md) open item 1):** token-minting entries now **appear** in the Data Access logs. Only the mapping of the target identity remains open (limitation 1).
+
+### Outstanding limitations
+
+1. **Audit identity not mapped.** The 8 records are **successful IAM Credentials `GenerateAccessToken` audit events**. They identify the target service account only by a **numeric resource identifier**, which has **not been independently matched** to the provisioner account. They are therefore not, on their own, evidence of which account the tokens were minted for, and the count is not reconciled against the operations in the window.
+2. **Operator-reported evidence.** The apply output, read-backs, denial and backup verifications were reported by the operator. Raw plans, state and logs stay in custody and are deliberately not in this repository.
+3. **No data and no workload.** The 7 tables are empty. No object upload, load job, query, mart build or cloud reconciliation has run (Gate C has not started). **No cloud data ingestion is claimed.**
+4. **Not production-ready.** This is one synthetic, single-region dev pilot in a project with no Organization. It has no VPC Service Controls, CMEK, organisation policies, group-based ownership, alerting or incident response, and no hard spending cap: **budget alerts are not caps**.
+5. **Personal owner identity:** a named personal account owns the dataset, so a change of operator requires a reviewed apply. The owner email is recorded in this document at the operator's request; Terraform code and examples use only a variable and placeholders.
+6. **Checker trust:** the checker relies on the approved `--dataset-owner` string and on the refresh representations observed on 2026-11-10. A different representation fails closed and needs a reviewed change.
+7. **Carried over:** wrapper bypass, text-based checks, an unrestricted project Owner (P8), and the resource-IAM escalation paths of the provisioner role, which is revoked but still defined.
+8. **Standing resources:** the bucket, dataset and tables persist, under deletion protection, until a separately approved Gate D cleanup.
+
+### Closure checks (offline, 2026-11-12)
+
+| Check | Result |
+| --- | --- |
+| Full `pytest` | **1170 passed, 1 skipped** |
+| `make gcp-offline-check` | **926 passed, 1 skipped**; `terraform fmt` passed |
+| `ruff check .` | Passed |
+| `terraform fmt -check -recursive` | Passed |
+| Docs validator (`scripts/validate_docs.py`) | Passed: 6 documents, 5 diagrams, 0 issues; `final_project_check.py` 79 checks, 0 issues |
+| `git diff --check` | Passed |
+
+No Terraform `init`, `validate`, `plan` or `apply` was run for this documentation update.
+
+## Next milestone: M7
+
+**M7: offline preparation for a controlled synthetic GCS-to-BigQuery ingestion** (Gate C, steps 1–3 of the [pilot runbook](../gcp_pilot_plan.md)). M7 prepares, but does not execute:
+- the exact M2/M3 synthetic run manifests and hashes, row counts and per-currency totals for the three input tables;
+- create-only, run-prefixed object names and an upload inventory within 5,000 transactions and 10 MiB;
+- three strict load-job configurations (explicit schemas, no autodetection, `CREATE_NEVER`, `WRITE_EMPTY`, max bad records 0) with idempotent job IDs;
+- the temporary load-grant design and its plan checker, the job and byte ledger, and post-load verification against M3;
+- tests and an approval packet.
+
+Any upload, load or query needs a separately approved access window. M7 itself starts no cloud work.
+
+**M6T closed.** All 18 pilot resources are deployed with empty tables, temporary access is revoked, and both state backups are verified. Next: M7 offline preparation.
