@@ -1,0 +1,13 @@
+# M7B controlled pilot snapshot: 4,000 transactions (20% headroom under max_transactions
+# 5,000 in infrastructure/pilot_controls.json). Defaults in synthetic_v2.yaml are unchanged.
+contract_version: 2.0.0
+seed: 42
+customers: 100
+accounts: 150
+beneficiaries: 300
+devices: 200
+transactions: 4000
+fraud_prevalence: 0.08
+event_start: '2025-01-01T00:00:00Z'
+event_end: '2026-01-01T00:00:00Z'
+currencies: [GBP, USD, EUR, JPY]

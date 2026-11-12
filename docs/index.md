@@ -76,4 +76,6 @@ Use this index to navigate the project documentation.
 - [M6R post-bootstrap GCP security verification](upgrade/m6r_validation.md)
 - [M6S provisioner-access window readiness](upgrade/m6s_validation.md)
 - [M6T BigQuery dataset IAM partial-apply recovery](upgrade/m6t_validation.md)
+- [M7A synthetic data ingestion readiness and gap assessment](upgrade/m7a_assessment.md)
+- [M7B immutable synthetic ingestion packet](upgrade/m7b_validation.md)
 - [M5 validation](upgrade/m5_validation.md)

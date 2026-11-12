@@ -35,6 +35,13 @@ def main(argv: list[str] | None = None) -> None:
         analytics_main(args[1:])
         return
 
+    if args and args[0] in {"build-ingestion-packet", "verify-ingestion-packet"}:
+        from financial_crime_ml.deployment.ingestion_packet import build_main, verify_main
+
+        command = build_main if args[0] == "build-ingestion-packet" else verify_main
+        command(args[1:])
+        return
+
     if args and args[0] == "ingest-financial-data":
         from financial_crime_ml.ingestion.foundation.cli import ingestion_main
 
