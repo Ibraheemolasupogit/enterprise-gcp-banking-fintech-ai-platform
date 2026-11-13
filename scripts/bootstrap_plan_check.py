@@ -17,6 +17,20 @@ Bootstrap root modes:
   revoke    M6S revocation: access disabled; the 11 bootstrap resources are unchanged and the
             two conditional grants are deleted (or were already removed outside Terraform).
 
+  M6 modes stay exactly as strict: any loader variable present must hold its disabled value,
+  and the M7C1 loader identity (4 resources) may appear only unchanged, never in initial or
+  recovery, and never with loader grants.
+
+M7C1 loader modes (bootstrap root; provisioner access must stay disabled):
+  loader-identity  The 11 bootstrap resources unchanged; exactly 4 creates: the keyless loader
+                   account and its three custom roles (infrastructure/iam/loader_roles.json).
+  loader-access    The 15 resources unchanged; exactly 6 expiring creates: loader jobs (project)
+                   and objects (project, packet-prefix condition) grants, three input-table
+                   members and operator token minting on the loader account. Requires
+                   --packet-id=m7p-<24 hex> and --bucket=<pilot bucket> (never printed).
+  loader-revoke    Loader access disabled; the 15 resources unchanged and the six grants
+                   deleted (or already removed outside Terraform).
+
 Pilot root modes (both require --dataset-owner=user:<approved owner>; M6T):
   pilot           First pilot deployment: exactly 18 creates (bucket, dataset, 7 tables, two
                   resource-level policies and 7 table members). The bucket and table grants
@@ -72,9 +86,28 @@ PILOT_FORBIDDEN = (*COMMON_FORBIDDEN, "google_project_iam_member",
 PILOT_SCAN_KEYS = ("variables", "resource_changes", "resource_drift", "output_changes",
                    "configuration")
 READER_TABLES = {"curated_transactions", "customers", "accounts"}
-BOOTSTRAP_MODES = ("initial", "recovery", "access", "revoke")
+M6_BOOTSTRAP_MODES = ("initial", "recovery", "access", "revoke")
+LOADER_MODES = ("loader-identity", "loader-access", "loader-revoke")
+BOOTSTRAP_MODES = (*M6_BOOTSTRAP_MODES, *LOADER_MODES)
 PILOT_MODES = ("pilot", "pilot-recovery")
 MODES = (*BOOTSTRAP_MODES, *PILOT_MODES)
+# ---- M7C1 dedicated loader ----
+LOADER_EMAIL = f"{PREFIX}-{ENVIRONMENT}-loader@{PROJECT}.iam.gserviceaccount.com"
+LOADER_MEMBER = f"serviceAccount:{LOADER_EMAIL}"
+LOADER_DATASET = f"{PREFIX}_{ENVIRONMENT}"
+LOADER_TABLES = ("accounts", "curated_transactions", "customers")
+LOADER_ACCOUNT = "google_service_account.loader[0]"
+LOADER_JOBS_GRANT = "google_project_iam_member.loader_jobs[0]"
+LOADER_OBJECTS_GRANT = "google_project_iam_member.loader_objects[0]"
+LOADER_TABLE_GRANTS = frozenset(f'google_bigquery_table_iam_member.loader["{t}"]'
+                                for t in LOADER_TABLES)
+LOADER_IMPERSONATION = "google_service_account_iam_member.operator_loader_impersonation[0]"
+LOADER_GRANTS = frozenset({LOADER_JOBS_GRANT, LOADER_OBJECTS_GRANT, *LOADER_TABLE_GRANTS,
+                           LOADER_IMPERSONATION})
+LOADER_OFF = {"loader_access_enabled": False, "loader_access_expiry": None,
+              "loader_bucket_name": None, "loader_object_prefix": None}
+PACKET_ID_RE = re.compile(r"^m7p-[0-9a-f]{24}$")
+BUCKET_RE = re.compile(r"^[a-z][a-z0-9-]{6,61}[a-z0-9]$")
 DATASET_POLICY = "module.bigquery.google_bigquery_dataset_iam_policy.metadata"
 DATASET_OWNER_ROLE = "roles/bigquery.dataOwner"
 # Mirrors the pilot dataset_owner_member validation in infrastructure/terraform/variables.tf.
@@ -89,7 +122,20 @@ def expected_roles(iam: Path = IAM) -> dict[str, set[str]]:
     for fname, rid in (("provisioner", "provision"), ("impersonate", "impersonate")):
         data = json.loads((iam / f"{fname}.role.json").read_text())
         roles[f"{role_prefix}_{rid}"] = set(data["includedPermissions"])
+    for key, data in loader_roles(iam).items():
+        roles[f"{role_prefix}_{key}"] = set(data["permissions"])
     return roles
+
+
+def loader_roles(iam: Path = IAM) -> dict:
+    path = iam / "loader_roles.json"
+    return json.loads(path.read_text()) if path.exists() else {}
+
+
+def loader_identity_addresses(iam: Path = IAM) -> set[str]:
+    """The M7C1 loader identity: keyless account + three custom roles (no grants)."""
+    return {LOADER_ACCOUNT,
+            *(f'google_project_iam_custom_role.loader["{k}"]' for k in loader_roles(iam))}
 
 
 def durable_addresses(iam: Path = IAM) -> set[str]:
@@ -126,6 +172,32 @@ def expiry_condition(expiry: str) -> dict:
     return {"title": f"expires-{expiry.replace(':', '-')}",
             "description": "M6K time-bound access; remove explicitly after expiry",
             "expression": f'request.time < timestamp("{expiry}")'}
+
+
+def loader_expiry_condition(expiry: str) -> dict:
+    """The exact condition the bootstrap root renders on the loader grants (except objects)."""
+    return {"title": f"loader-expires-{expiry.replace(':', '-')}",
+            "description": "M7C1 time-bound loader access; revoke explicitly after use",
+            "expression": f'request.time < timestamp("{expiry}")'}
+
+
+def loader_object_condition(expiry: str, bucket: str, prefix: str) -> dict:
+    """Expiry AND object type AND packet prefix in the approved bucket (all three required)."""
+    return {"title": f"loader-objects-expires-{expiry.replace(':', '-')}",
+            "description": "M7C1 time-bound packet-prefix object access; revoke explicitly "
+                           "after use",
+            "expression": (f'request.time < timestamp("{expiry}") && resource.type == '
+                           f'"storage.googleapis.com/Object" && resource.name.startsWith('
+                           f'"projects/_/buckets/{bucket}/objects/{prefix}")')}
+
+
+def _loader_condition_shape_ok(values: dict, title_prefix: str) -> bool:
+    """Used where the approved expiry is unknown (revocation): one expiring condition."""
+    conditions = values.get("condition") or []
+    return (len(conditions) == 1 and isinstance(conditions[0], dict)
+            and str(conditions[0].get("title", "")).startswith(title_prefix)
+            and str(conditions[0].get("expression", "")).startswith(
+                'request.time < timestamp("'))
 
 
 def _check_condition(addr: str, values: dict, expected: dict | None,
@@ -181,6 +253,37 @@ def _check_values(rc: dict, roles: dict[str, set[str]], problems: list[str],
                 ctx.get("operator") is not None and member != ctx["operator"]):
             problems.append(f"{addr}: member is not the single named operator")
         _check_condition(addr, values, ctx.get("condition"), problems)
+    elif kind == "google_project_iam_member" and name in ("loader_jobs", "loader_objects"):
+        if values.get("role") != f"{ROLE_PREFIX}{name}":
+            problems.append(f"{addr}: unexpected role")
+        if values.get("member") != LOADER_MEMBER:
+            problems.append(f"{addr}: member is not the loader service account")
+        _check_loader_condition(addr, values, ctx, "objects" if name == "loader_objects"
+                                else "expiry", problems)
+    elif kind == "google_bigquery_table_iam_member" and name == "loader":
+        key = re.fullmatch(r'google_bigquery_table_iam_member\.loader\["([a-z_]+)"\]', addr)
+        table = key.group(1) if key else None
+        if table not in LOADER_TABLES or values.get("table_id") not in (
+                table, f"projects/{PROJECT}/datasets/{LOADER_DATASET}/tables/{table}"):
+            problems.append(f"{addr}: not one of the three approved input tables")
+        if values.get("dataset_id") != LOADER_DATASET:
+            problems.append(f"{addr}: not in dataset {LOADER_DATASET}")
+        if values.get("role") != f"{ROLE_PREFIX}loader_tables":
+            problems.append(f"{addr}: unexpected role")
+        if values.get("member") != LOADER_MEMBER:
+            problems.append(f"{addr}: member is not the loader service account")
+        _check_loader_condition(addr, values, ctx, "expiry", problems)
+    elif kind == "google_service_account_iam_member" and name == "operator_loader_impersonation":
+        if values.get("service_account_id") != (
+                f"projects/{PROJECT}/serviceAccounts/{LOADER_EMAIL}"):
+            problems.append(f"{addr}: grant is not on the loader service account")
+        if values.get("role") != f"{ROLE_PREFIX}impersonate":
+            problems.append(f"{addr}: unexpected role")
+        member = values.get("member")
+        if not OPERATOR_RE.match(str(member)) or (
+                ctx.get("operator") is not None and member != ctx["operator"]):
+            problems.append(f"{addr}: member is not the single named operator")
+        _check_loader_condition(addr, values, ctx, "expiry", problems)
     elif kind == "google_project_iam_audit_config":
         if values.get("service") != AUDIT_SERVICE:
             problems.append(f"{addr}: audit service must be {AUDIT_SERVICE}")
@@ -195,10 +298,67 @@ def _check_values(rc: dict, roles: dict[str, set[str]], problems: list[str],
         problems.append(f"{addr}: unexpected resource type")
 
 
+def _check_loader_condition(addr: str, values: dict, ctx: dict, kind: str,
+                            problems: list[str]) -> None:
+    expected = ctx.get(f"loader_{kind}_condition")
+    if expected is not None:
+        _check_condition(addr, values, expected, problems)
+    elif not _loader_condition_shape_ok(
+            values, "loader-objects-expires-" if kind == "objects" else "loader-expires-"):
+        problems.append(f"{addr}: must carry exactly one expiring loader condition")
+
+
 def _check_variables(variables: dict, expected: dict, problems: list[str]) -> None:
     for name, value in expected.items():
         if name not in variables or variables[name].get("value") != value:
             problems.append(f"variable {name} is not the approved value")
+
+
+def _window(plan: dict, expiry: object, name: str, problems: list[str]) -> float | None:
+    planned, end = _parse_utc(plan.get("timestamp")), _parse_utc(expiry)
+    if planned is None:
+        problems.append("plan timestamp missing or invalid")
+    if planned is None or end is None:
+        return None
+    window = end - planned
+    if not timedelta(0) < window <= MAX_WINDOW:
+        problems.append(f"{name} must be after the plan timestamp and at most 8 h later")
+    return round(window.total_seconds() / 3600, 2)
+
+
+def _loader_context(plan: dict, variables: dict, problems: list[str], packet_id: object,
+                    bucket: object) -> dict:
+    """loader-access: approved expiry, bucket and packet prefix; nothing is printed but the
+    packet ID and expiry. The bucket comes from the operator (--bucket), like --dataset-owner."""
+    def value(name: str) -> object:
+        return (variables.get(name) or {}).get("value")
+
+    operator, expiry = value("operator_member"), value("loader_access_expiry")
+    if not OPERATOR_RE.match(str(operator)):
+        problems.append("variable operator_member is not a single user: principal")
+    if not (isinstance(packet_id, str) and PACKET_ID_RE.match(packet_id)):
+        problems.append("approved packet ID not supplied (--packet-id=m7p-<24 hex>)")
+        packet_id = None
+    if not (isinstance(bucket, str) and BUCKET_RE.match(bucket)):
+        problems.append("approved bucket not supplied (--bucket)")
+        bucket = None
+    prefix = None if packet_id is None else f"m7/ingestion/{packet_id}/"
+    if value("loader_object_prefix") != prefix or prefix is None:
+        problems.append("variable loader_object_prefix is not the approved packet prefix")
+    if value("loader_bucket_name") != bucket or bucket is None:
+        problems.append("variable loader_bucket_name is not the approved bucket")
+    if not (isinstance(expiry, str) and EXPIRY_RE.match(expiry)):
+        problems.append("variable loader_access_expiry is not a UTC RFC 3339 timestamp")
+        # Unmatchable sentinels: every grant's condition is then reported as wrong.
+        return {"operator": operator, "loader_expiry_condition": {"title": None},
+                "loader_objects_condition": {"title": None}, "expiry": None,
+                "packet_id": packet_id}
+    hours = _window(plan, expiry, "loader_access_expiry", problems)
+    objects = (loader_object_condition(expiry, bucket, prefix) if bucket and prefix
+               else {"title": None})
+    return {"operator": operator, "loader_expiry_condition": loader_expiry_condition(expiry),
+            "loader_objects_condition": objects, "expiry": expiry, "window_hours": hours,
+            "packet_id": packet_id}
 
 
 def _access_context(plan: dict, variables: dict, problems: list[str]) -> dict:
@@ -262,11 +422,38 @@ ETAG_DRIFT_SPECS = {
     AUDIT_ADDRESS: ("google_project_iam_audit_config", "iamcredentials", 0, AUDIT_CONFIG_KEYS,
                     _audit_values_ok, "the approved iam.googleapis.com audit config"),
 }
+def _loader_grant_values_ok(name: str, title_prefix: str):
+    def ok(side: dict) -> bool:
+        return (side.get("role") == f"{ROLE_PREFIX}{name}" and side.get("member") == LOADER_MEMBER
+                and side.get("project") == PROJECT and bool(side.get("id"))
+                and _loader_condition_shape_ok(side, title_prefix))
+    return ok
+
+
+# M7C1: the two loader project members are created by one apply, so the first one's stored
+# project-policy etag is stale at revocation. Same strict etag-only rule as the M6 exceptions.
+ETAG_DRIFT_SPECS[LOADER_JOBS_GRANT] = (
+    "google_project_iam_member", "loader_jobs", 0, RUNNER_GRANT_KEYS,
+    _loader_grant_values_ok("loader_jobs", "loader-expires-"), "the approved loader jobs grant")
+ETAG_DRIFT_SPECS[LOADER_OBJECTS_GRANT] = (
+    "google_project_iam_member", "loader_objects", 0, RUNNER_GRANT_KEYS,
+    _loader_grant_values_ok("loader_objects", "loader-objects-expires-"),
+    "the approved loader objects grant")
+
 # Which etag-only drift each mode tolerates. Every other mode tolerates none.
 # M6T: access mode also tolerates the audit config, after a revoke apply rewrote the project
 # policy (verified by operator inspection: only etag differed). Same strict validation.
 ETAG_DRIFT_BY_MODE = {"access": frozenset({RUNNER_GRANT, AUDIT_ADDRESS}),
                       "revoke": frozenset({RUNNER_GRANT, AUDIT_ADDRESS})}
+# M7C1, kept separate so the M6 table above is unchanged: the loader modes follow the M6T
+# revoke, so they tolerate the same two; loader-revoke also tolerates the two loader project
+# grants (and nothing else).
+LOADER_ETAG_DRIFT_BY_MODE = {
+    "loader-identity": frozenset({RUNNER_GRANT, AUDIT_ADDRESS}),
+    "loader-access": frozenset({RUNNER_GRANT, AUDIT_ADDRESS}),
+    "loader-revoke": frozenset({RUNNER_GRANT, AUDIT_ADDRESS, LOADER_JOBS_GRANT,
+                                LOADER_OBJECTS_GRANT}),
+}
 
 
 def etag_drift_problems(rc: dict, address: str) -> list[str]:
@@ -310,17 +497,31 @@ def runner_etag_drift_problems(rc: dict) -> list[str]:
     return etag_drift_problems(rc, RUNNER_GRANT)
 
 
-def _check_bootstrap(plan: dict, mode: str, iam: Path) -> dict:
+def _check_bootstrap(plan: dict, mode: str, iam: Path, packet_id: object = None,
+                     bucket: object = None) -> dict:
     roles, durable = expected_roles(iam), durable_addresses(iam)
     existing = durable | {AUDIT_ADDRESS}
+    loader_identity = loader_identity_addresses(iam)
+    problems: list[str] = []
+    variables = plan.get("variables") or {}
+    identity_on = (variables.get("loader_identity_enabled") or {}).get("value")
+    if mode in LOADER_MODES:
+        if identity_on is not True:
+            problems.append("variable loader_identity_enabled must be true in loader modes")
+    elif "loader_identity_enabled" in variables and identity_on is not False and not (
+            mode in ("access", "revoke") and identity_on is True):
+        problems.append("variable loader_identity_enabled is not allowed in this mode")
+    # M6 access/revoke after M7D: the loader identity may exist, unchanged, without grants.
+    m6_existing = existing | (loader_identity if identity_on is True else set())
     want_create, want_noop, want_delete = {
         "initial": (existing, set(), set()),
         "recovery": ({AUDIT_ADDRESS}, durable, set()),
-        "access": (ACCESS_ADDRESSES, existing, set()),
-        "revoke": (set(), existing, ACCESS_ADDRESSES),
+        "access": (ACCESS_ADDRESSES, m6_existing, set()),
+        "revoke": (set(), m6_existing, ACCESS_ADDRESSES),
+        "loader-identity": (loader_identity, existing, set()),
+        "loader-access": (LOADER_GRANTS, existing | loader_identity, set()),
+        "loader-revoke": (set(), existing | loader_identity, LOADER_GRANTS),
     }[mode]
-    problems: list[str] = []
-    variables = plan.get("variables") or {}
     expected_vars = dict(EXPECTED_VARIABLES, provisioner_access_enabled=(mode == "access"))
     _check_variables(variables, expected_vars, problems)
     ctx: dict = {}
@@ -328,15 +529,25 @@ def _check_bootstrap(plan: dict, mode: str, iam: Path) -> dict:
         ctx = _access_context(plan, variables, problems)
     elif "access_expiry" not in variables or variables["access_expiry"].get("value") is not None:
         problems.append("variable access_expiry must be null while access is disabled")
+    if mode == "loader-access":
+        _check_variables(variables, {"loader_access_enabled": True}, problems)
+        ctx = _loader_context(plan, variables, problems, packet_id, bucket)
+    elif mode in LOADER_MODES:
+        _check_variables(variables, LOADER_OFF, problems)  # all present, all disabled
+    else:
+        for name, value in LOADER_OFF.items():  # pre-M7C1 plans omit them entirely
+            if name in variables and variables[name].get("value") != value:
+                problems.append(f"variable {name} is not the approved value")
     already_removed: set[str] = set()
     etag_drift: list[str] = []
     seen: set[str] = set()  # each tolerated address at most once; duplicates are rejected
-    tolerated = ETAG_DRIFT_BY_MODE.get(mode, frozenset())
+    tolerated = ETAG_DRIFT_BY_MODE.get(mode) or LOADER_ETAG_DRIFT_BY_MODE.get(mode, frozenset())
     for rc in plan.get("resource_drift") or []:
         addr, actions = rc.get("address"), (rc.get("change") or {}).get("actions")
         if addr in seen:
             problems.append(f"drift detected outside Terraform: {addr} (duplicate)")
-        elif mode == "revoke" and addr in ACCESS_ADDRESSES and actions == ["delete"]:
+        elif ((mode == "revoke" and addr in ACCESS_ADDRESSES)
+              or (mode == "loader-revoke" and addr in LOADER_GRANTS)) and actions == ["delete"]:
             seen.add(addr)
             already_removed.add(addr)
         elif addr in tolerated:
@@ -355,9 +566,16 @@ def _check_bootstrap(plan: dict, mode: str, iam: Path) -> dict:
     if mode == "access":
         report.update(access_expiry=ctx.get("expiry"), window_hours=ctx.get("window_hours"),
                       accepted_etag_drift=sorted(etag_drift))
-    if mode == "revoke":
+    if mode in ("revoke", "loader-revoke"):
         report.update(already_removed=sorted(already_removed),
                       accepted_etag_drift=sorted(etag_drift))
+    if mode in ("loader-identity", "loader-access"):
+        report["accepted_etag_drift"] = sorted(etag_drift)
+    if mode == "loader-access":
+        report.update(loader_access_expiry=ctx.get("expiry"),
+                      window_hours=ctx.get("window_hours"), packet_id=ctx.get("packet_id"),
+                      bucket_approved=bucket is not None and not any(
+                          "bucket" in p for p in problems))
     return report
 
 
@@ -642,12 +860,13 @@ def _check_pilot(plan: dict, mode: str = "pilot", owner: object = None) -> dict:
     return report
 
 
-def check_plan(plan: dict, mode: str, iam: Path = IAM, dataset_owner: object = None) -> dict:
+def check_plan(plan: dict, mode: str, iam: Path = IAM, dataset_owner: object = None,
+               packet_id: object = None, bucket: object = None) -> dict:
     if mode not in MODES:
         raise ValueError(f"unknown mode: {mode}")
     if mode in PILOT_MODES:
         return _check_pilot(plan, mode, dataset_owner)
-    return _check_bootstrap(plan, mode, iam)
+    return _check_bootstrap(plan, mode, iam, packet_id, bucket)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -656,6 +875,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--mode", choices=MODES, required=True)
     parser.add_argument("--dataset-owner", default=None,
                         help="pilot modes: the approved user: dataset owner (never printed)")
+    parser.add_argument("--packet-id", default=None,
+                        help="loader-access: the approved M7B packet ID (m7p-<24 hex>)")
+    parser.add_argument("--bucket", default=None,
+                        help="loader-access: the approved pilot bucket (never printed)")
     args = parser.parse_args(argv)
     try:
         plan = json.load(sys.stdin)
@@ -664,7 +887,8 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         print(json.dumps({"ok": False, "problems": [f"invalid plan JSON: {exc}"]}))
         return 2
-    report = check_plan(plan, args.mode, dataset_owner=args.dataset_owner)
+    report = check_plan(plan, args.mode, dataset_owner=args.dataset_owner,
+                        packet_id=args.packet_id, bucket=args.bucket)
     print(json.dumps(report, indent=2))
     return 0 if report["ok"] else 1
 

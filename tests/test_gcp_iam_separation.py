@@ -143,13 +143,20 @@ def test_bootstrap_inventory_is_additive_and_bounded():
         ("google_project_iam_member", "provisioner"),
         ("google_service_account_iam_member", "operator_impersonation"),
         ("google_project_iam_audit_config", "iamcredentials"),
+        # M7C1: loader identity and access window; every one gated off by default.
+        ("google_service_account", "loader"),
+        ("google_project_iam_custom_role", "loader"),
+        ("google_project_iam_member", "loader_jobs"),
+        ("google_project_iam_member", "loader_objects"),
+        ("google_bigquery_table_iam_member", "loader"),
+        ("google_service_account_iam_member", "operator_loader_impersonation"),
     ]
     for forbidden in ("google_project_iam_policy", "google_project_iam_binding",
                       "google_service_account_key", "google_project_service",
                       "roles/owner", "roles/editor", "allUsers", "allAuthenticatedUsers",
                       "serviceAccountTokenCreator"):
         assert forbidden not in text
-    for name in ("runner", "provisioner"):
+    for name in ("runner", "provisioner", "loader"):
         assert "prevent_destroy = true" in block(text, "google_service_account", name)
     # M6Q: Service Account Credentials Data Access logging is configured on the IAM service;
     # an independent iamcredentials.googleapis.com auditConfig is rejected by the API.
@@ -212,3 +219,113 @@ def test_bootstrap_inputs_are_placeholders_and_lockfile_matches():
     assert (BOOTSTRAP / lock).read_bytes() == (TF / lock).read_bytes()
     for root in (TF, BOOTSTRAP):
         assert not list(root.glob("*.tfstate*")) and not list(root.glob("*.tfvars"))
+
+
+# ---------------------------------------------------------------- M7C1 loader
+
+LOADER_EXPECTED = {
+    "loader_jobs": {"bigquery.jobs.create"},
+    "loader_objects": {"storage.objects.create", "storage.objects.get"},
+    "loader_tables": {"bigquery.tables.get", "bigquery.tables.getData",
+                      "bigquery.tables.updateData"},
+}
+
+
+def test_loader_roles_are_exactly_the_reviewed_minimum():
+    loader = role("loader_roles.json")
+    assert {k: set(v["permissions"]) for k, v in loader.items()} == LOADER_EXPECTED
+    every = set().union(*LOADER_EXPECTED.values())
+    assert every.isdisjoint(ADMIN_EXACT)
+    assert not any(p.startswith(ADMIN_PREFIXES) for p in every)
+    # No overwrite/delete, enumeration, schema/metadata change, table creation, IAM or
+    # dataset rights; no service-usage, export or bucket permission.
+    assert every.isdisjoint({"storage.objects.delete", "storage.objects.list",
+                             "storage.objects.update", "bigquery.tables.create",
+                             "bigquery.tables.update", "bigquery.tables.delete",
+                             "bigquery.tables.export", "bigquery.jobs.get", "bigquery.jobs.list",
+                             "bigquery.jobs.update", "bigquery.jobs.delete"})
+    assert not any(p.startswith(("storage.buckets.", "bigquery.datasets.", "serviceusage.",
+                                 "iam.", "resourcemanager.")) for p in every)
+    assert not any("IamPolicy" in p for p in every)
+    for spec in loader.values():
+        assert len(spec["permissions"]) == len(set(spec["permissions"]))
+        assert spec["title"] and spec["description"]
+
+
+def test_loader_does_not_widen_provisioner_runner_or_impersonation():
+    assert permissions("provisioner.role.json") == EXPECTED_PROVISIONER
+    assert permissions("impersonate.role.json") == {"iam.serviceAccounts.getAccessToken"}
+    assert set(role("runtime_roles.json")) == {"jobs", "metadata", "objects", "readers", "tables"}
+    text = (BOOTSTRAP / "main.tf").read_text()
+    for kind, name in (("google_project_iam_member", "loader_jobs"),
+                       ("google_project_iam_member", "loader_objects"),
+                       ("google_bigquery_table_iam_member", "loader"),
+                       ("google_service_account_iam_member", "operator_loader_impersonation")):
+        body = block(text, kind, name)
+        assert "google_service_account.runner" not in body
+        assert "google_service_account.provisioner" not in body
+        assert "member  = google_service_account.loader[0].member" in body or \
+            "member     = google_service_account.loader[0].member" in body or \
+            "member             = var.operator_member" in body
+
+
+def test_loader_identity_and_access_are_gated_off_by_default():
+    text = (BOOTSTRAP / "main.tf").read_text()
+    assert "loader_identity_count = var.loader_identity_enabled ? 1 : 0" in text
+    assert "loader_access_count   = var.loader_access_enabled ? 1 : 0" in text
+    assert re.search(r"^\s*count\s+= local\.loader_identity_count$",
+                     block(text, "google_service_account", "loader"), re.M)
+    assert "for_each    = var.loader_identity_enabled ? local.loader_roles : {}" in \
+        block(text, "google_project_iam_custom_role", "loader")
+    for kind, name in (("google_project_iam_member", "loader_jobs"),
+                       ("google_project_iam_member", "loader_objects"),
+                       ("google_service_account_iam_member", "operator_loader_impersonation")):
+        body = block(text, kind, name)
+        assert re.search(r"^\s*count\s+= local\.loader_access_count$", body, re.M)
+        assert "condition {" in body
+    tables = block(text, "google_bigquery_table_iam_member", "loader")
+    assert "for_each   = local.loader_tables" in tables and "condition {" in tables
+    assert ('loader_tables         = var.loader_access_enabled ? toset(["accounts", '
+            '"curated_transactions", "customers"]) : toset([])') in text
+    variables = (BOOTSTRAP / "variables.tf").read_text()
+    for name in ("loader_identity_enabled", "loader_access_enabled"):
+        assert re.search(rf'variable "{name}" \{{[^}}]*default     = false', variables)
+    for name in ("loader_access_expiry", "loader_bucket_name", "loader_object_prefix"):
+        assert re.search(rf'variable "{name}" \{{\n  type        = string\n'
+                         r'  default     = null', variables)
+    example = (BOOTSTRAP / "environments/dev.tfvars.example").read_text()
+    assert "loader_identity_enabled     = false" in example
+    assert "loader_access_enabled       = false" in example
+
+
+def test_loader_variables_validate_expiry_overlap_bucket_and_prefix():
+    variables = (BOOTSTRAP / "variables.tf").read_text()
+    assert ("!var.loader_access_enabled || (var.loader_identity_enabled && "
+            "!var.provisioner_access_enabled)") in variables
+    assert variables.count('timeadd(plantimestamp(), "8h")') == 2  # provisioner and loader
+    assert 'timecmp(var.loader_access_expiry, plantimestamp()) > 0' in variables
+    assert '"^m7/ingestion/m7p-[0-9a-f]{24}/$"' in variables
+    assert '"^[a-z][a-z0-9-]{6,61}[a-z0-9]$", var.loader_bucket_name' in variables
+
+
+def test_loader_grants_target_only_approved_scopes():
+    text = (BOOTSTRAP / "main.tf").read_text()
+    # Never the dataset (authoritative policy in the pilot root) or bucket-level IAM.
+    for forbidden in ("google_bigquery_dataset_iam", "google_storage_bucket_iam",
+                      "google_storage_managed_folder_iam", "google_bigquery_dataset_access",
+                      "google_service_account_key", "google_project_iam_binding"):
+        assert forbidden not in text
+    assert "loader_dataset_id     = local.role_prefix" in text
+    objects = (r'expression  = "request.time < timestamp(\"${local.loader_expiry}\") && '
+               r'resource.type == \"storage.googleapis.com/Object\" && '
+               r'resource.name.startsWith(\"projects/_/buckets/${coalesce(var.loader_bucket_name,'
+               r' "unset")}/objects/${coalesce(var.loader_object_prefix, "unset/")}\")"')
+    assert objects in text
+    assert 'expression  = "request.time < timestamp(\\"${local.loader_expiry}\\")"' in text
+    impersonation = block(text, "google_service_account_iam_member",
+                          "operator_loader_impersonation")
+    assert "service_account_id = google_service_account.loader[0].name" in impersonation
+    assert "role               = google_project_iam_custom_role.impersonate.name" in impersonation
+    account = block(text, "google_service_account", "loader")
+    assert 'account_id   = "${local.identity_prefix}-loader"' in account
+    assert len(f"{'a' * 13}-test-loader") <= 30

@@ -78,4 +78,5 @@ Use this index to navigate the project documentation.
 - [M6T BigQuery dataset IAM partial-apply recovery](upgrade/m6t_validation.md)
 - [M7A synthetic data ingestion readiness and gap assessment](upgrade/m7a_assessment.md)
 - [M7B immutable synthetic ingestion packet](upgrade/m7b_validation.md)
+- [M7C1 dedicated loader identity and least-privilege IAM](upgrade/m7c1_validation.md)
 - [M5 validation](upgrade/m5_validation.md)

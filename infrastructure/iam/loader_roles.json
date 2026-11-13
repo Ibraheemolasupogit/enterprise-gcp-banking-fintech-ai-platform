@@ -1,0 +1,26 @@
+{
+  "loader_jobs": {
+    "title": "Financial pilot loader jobs",
+    "description": "M7C1: create BigQuery jobs in the pilot project. Project scope is the only scope jobs.create has. Granted only with an expiring condition.",
+    "permissions": [
+      "bigquery.jobs.create"
+    ]
+  },
+  "loader_objects": {
+    "title": "Financial pilot loader objects",
+    "description": "M7C1: create-only upload and read-back of packet objects. No list, delete, overwrite or bucket rights. Granted with expiry and packet-prefix conditions.",
+    "permissions": [
+      "storage.objects.create",
+      "storage.objects.get"
+    ]
+  },
+  "loader_tables": {
+    "title": "Financial pilot loader input tables",
+    "description": "M7C1: load into and read back the three existing input tables. No create, update, delete or IAM rights. Granted per table with an expiring condition.",
+    "permissions": [
+      "bigquery.tables.get",
+      "bigquery.tables.getData",
+      "bigquery.tables.updateData"
+    ]
+  }
+}

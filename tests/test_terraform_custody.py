@@ -510,10 +510,20 @@ def test_approved_token_flow_executes_with_sanitised_environment(world, tmp_path
 def test_bootstrap_instance_count_is_11_with_audit_and_without_access():
     text = (ROOT / custody.ROOTS["bootstrap"] / "main.tf").read_text()
     runtime = json.loads((ROOT / "infrastructure/iam/runtime_roles.json").read_text())
-    always = gated_access = gated_audit = 0
+    loader_roles = json.loads((ROOT / "infrastructure/iam/loader_roles.json").read_text())
+    always = gated_access = gated_audit = gated_loader_identity = gated_loader_access = 0
     for kind, name in re.findall(r'^resource "(\w+)" "(\w+)"', text, re.M):
         body = text[text.index(f'resource "{kind}" "{name}"'):].split("\n}\n", 1)[0]
-        if "for_each" in body:
+        # M7C1 loader resources: every one is gated off by default.
+        if "for_each    = var.loader_identity_enabled ? local.loader_roles : {}" in body:
+            gated_loader_identity += len(loader_roles)
+        elif re.search(r"count\s+= local\.loader_identity_count", body):
+            gated_loader_identity += 1
+        elif "for_each   = local.loader_tables" in body:
+            gated_loader_access += 3  # the three input tables, only while access is enabled
+        elif re.search(r"count\s+= local\.loader_access_count", body):
+            gated_loader_access += 1
+        elif "for_each" in body:
             always += len(runtime)
         elif re.search(r"count\s+= local\.access_count", body):
             gated_access += 1
@@ -524,6 +534,9 @@ def test_bootstrap_instance_count_is_11_with_audit_and_without_access():
     assert (always, gated_access, gated_audit) == (10, 2, 1)
     assert always + gated_audit == 11  # first bootstrap: audit on, provisioner access off
     assert always + gated_audit + gated_access == 13  # later access window
+    # M7C1: the disabled baseline stays 11; loader identity adds 4, a loader window 6 more.
+    assert (gated_loader_identity, gated_loader_access) == (4, 6)
+    assert "loader_tables         = var.loader_access_enabled ? toset([" in text
 
 
 # ---------------------------------------------------------------- M6S plan-scope flags

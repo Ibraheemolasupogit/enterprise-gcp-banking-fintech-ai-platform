@@ -40,6 +40,29 @@ locals {
   }
 }
 
+# M7C1 dedicated loader (keyless). Two independent switches, both off by default:
+#   loader_identity_enabled  durable account + three custom roles; grants nothing by itself.
+#   loader_access_enabled    six expiring grants for one M7D window; revoke by setting false.
+locals {
+  loader_roles          = jsondecode(file("${path.module}/../../iam/loader_roles.json"))
+  loader_identity_count = var.loader_identity_enabled ? 1 : 0
+  loader_access_count   = var.loader_access_enabled ? 1 : 0
+  loader_dataset_id     = local.role_prefix
+  loader_tables         = var.loader_access_enabled ? toset(["accounts", "curated_transactions", "customers"]) : toset([])
+  loader_expiry         = coalesce(var.loader_access_expiry, "1970-01-01T00:00:00Z")
+  loader_expiry_condition = {
+    title       = "loader-expires-${replace(coalesce(var.loader_access_expiry, "unset"), ":", "-")}"
+    description = "M7C1 time-bound loader access; revoke explicitly after use"
+    expression  = "request.time < timestamp(\"${local.loader_expiry}\")"
+  }
+  # Cloud Storage evaluates resource.name as projects/_/buckets/<bucket>/objects/<object>.
+  loader_object_condition = {
+    title       = "loader-objects-expires-${replace(coalesce(var.loader_access_expiry, "unset"), ":", "-")}"
+    description = "M7C1 time-bound packet-prefix object access; revoke explicitly after use"
+    expression  = "request.time < timestamp(\"${local.loader_expiry}\") && resource.type == \"storage.googleapis.com/Object\" && resource.name.startsWith(\"projects/_/buckets/${coalesce(var.loader_bucket_name, "unset")}/objects/${coalesce(var.loader_object_prefix, "unset/")}\")"
+  }
+}
+
 # ---- Durable identities and role definitions (no keys are ever created) ----
 
 resource "google_service_account" "runner" {
@@ -147,6 +170,90 @@ resource "google_project_iam_audit_config" "iamcredentials" {
   }
   audit_log_config {
     log_type = "DATA_READ"
+  }
+}
+
+# ---- M7C1 loader identity (durable once created; grants nothing on its own) ----
+
+resource "google_service_account" "loader" {
+  count        = local.loader_identity_count
+  project      = var.project_id
+  account_id   = "${local.identity_prefix}-loader"
+  display_name = "Synthetic financial ingestion loader"
+  description  = "Keyless; impersonated only for an approved M7D ingestion window"
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+resource "google_project_iam_custom_role" "loader" {
+  for_each    = var.loader_identity_enabled ? local.loader_roles : {}
+  project     = var.project_id
+  role_id     = "${local.role_prefix}_${each.key}"
+  title       = each.value.title
+  description = each.value.description
+  stage       = "GA"
+  permissions = each.value.permissions
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+# ---- M7C1 loader access window: six additive, expiring grants; never permanent ----
+
+# Project is the only scope bigquery.jobs.create has; only the expiry can narrow it.
+resource "google_project_iam_member" "loader_jobs" {
+  count   = local.loader_access_count
+  project = var.project_id
+  role    = google_project_iam_custom_role.loader["loader_jobs"].name
+  member  = google_service_account.loader[0].member
+  condition {
+    title       = local.loader_expiry_condition.title
+    description = local.loader_expiry_condition.description
+    expression  = local.loader_expiry_condition.expression
+  }
+}
+
+# Project-level member narrowed by condition to the packet prefix in the pilot bucket. Not a
+# bucket member: the pilot root's bucket policy is authoritative and would remove it.
+resource "google_project_iam_member" "loader_objects" {
+  count   = local.loader_access_count
+  project = var.project_id
+  role    = google_project_iam_custom_role.loader["loader_objects"].name
+  member  = google_service_account.loader[0].member
+  condition {
+    title       = local.loader_object_condition.title
+    description = local.loader_object_condition.description
+    expression  = local.loader_object_condition.expression
+  }
+}
+
+# Additive members on exactly the three existing input tables; the pilot root's runner members
+# on the same tables are separate and unaffected. Never the dataset (authoritative policy).
+resource "google_bigquery_table_iam_member" "loader" {
+  for_each   = local.loader_tables
+  project    = var.project_id
+  dataset_id = local.loader_dataset_id
+  table_id   = each.key
+  role       = google_project_iam_custom_role.loader["loader_tables"].name
+  member     = google_service_account.loader[0].member
+  condition {
+    title       = local.loader_expiry_condition.title
+    description = local.loader_expiry_condition.description
+    expression  = local.loader_expiry_condition.expression
+  }
+}
+
+# Token minting on the loader account resource only, for the same single named operator.
+resource "google_service_account_iam_member" "operator_loader_impersonation" {
+  count              = local.loader_access_count
+  service_account_id = google_service_account.loader[0].name
+  role               = google_project_iam_custom_role.impersonate.name
+  member             = var.operator_member
+  condition {
+    title       = local.loader_expiry_condition.title
+    description = local.loader_expiry_condition.description
+    expression  = local.loader_expiry_condition.expression
   }
 }
 
