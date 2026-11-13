@@ -42,6 +42,18 @@ def main(argv: list[str] | None = None) -> None:
         command(args[1:])
         return
 
+    if args and args[0] == "render-ingestion-bundle":
+        from financial_crime_ml.deployment.ingestion_bundle import render_main
+
+        render_main(args[1:])
+        return
+
+    if args and args[0] == "verify-ingestion-evidence":
+        from financial_crime_ml.deployment.ingestion_verify import verify_main
+
+        verify_main(args[1:])
+        return
+
     if args and args[0] == "ingest-financial-data":
         from financial_crime_ml.ingestion.foundation.cli import ingestion_main
 

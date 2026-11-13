@@ -38,6 +38,13 @@ Pilot root modes (both require --dataset-owner=user:<approved owner>; M6T):
                   approved owner (roles/bigquery.dataOwner) and the runner metadata role.
   pilot-recovery  After the M6S partial apply (17/18): the 17 created resources unchanged and
                   exactly one create of the dataset policy, with the same content rule.
+  pilot-loaded    M7C2 (G6), after the M7D loads: all 18 resources unchanged, no create,
+                  update or delete. Requires --packet-dir and --expected-manifest-sha256.
+                  The three input tables must hold exactly the packet's rows and logical
+                  bytes and the four marts must be empty. The only refresh drift accepted is
+                  on an input table: num_rows 0 -> packet rows, num_bytes 0 -> packet logical
+                  bytes, with etag and last_modified_time (forward, not after the plan) moving
+                  together. Schema, labels, protection, IAM or anything else: rejected.
 
 Exit 0 when ok, 1 when the plan has problems, 2 when the input cannot be parsed.
 
@@ -89,7 +96,7 @@ READER_TABLES = {"curated_transactions", "customers", "accounts"}
 M6_BOOTSTRAP_MODES = ("initial", "recovery", "access", "revoke")
 LOADER_MODES = ("loader-identity", "loader-access", "loader-revoke")
 BOOTSTRAP_MODES = (*M6_BOOTSTRAP_MODES, *LOADER_MODES)
-PILOT_MODES = ("pilot", "pilot-recovery")
+PILOT_MODES = ("pilot", "pilot-recovery", "pilot-loaded")
 MODES = (*BOOTSTRAP_MODES, *PILOT_MODES)
 # ---- M7C1 dedicated loader ----
 LOADER_EMAIL = f"{PREFIX}-{ENVIRONMENT}-loader@{PROJECT}.iam.gserviceaccount.com"
@@ -821,7 +828,86 @@ def pilot_metadata_drift_problems(rc: dict, planned: datetime | None) -> list[st
     return problems
 
 
-def _check_pilot(plan: dict, mode: str = "pilot", owner: object = None) -> dict:
+# ---- M7C2 (G6): data-metadata drift on the three input tables after the M7D loads ----
+LOADED_DRIFT_ATTRS = frozenset({"num_rows", "num_bytes", "etag", "last_modified_time"})
+TABLE_SIZE_ATTRS = ("num_rows", "num_bytes", "num_long_term_bytes")
+
+
+def _table_address(table: str) -> str:
+    return f'module.bigquery.google_bigquery_table.products["{table}"]'
+
+
+def loaded_expectation_problems(loaded: object) -> list[str]:
+    """The packet-derived expectation: exactly the three input tables, positive integers."""
+    tables = loaded.get("tables") if isinstance(loaded, dict) else None
+    if not isinstance(tables, dict) or set(tables) != READER_TABLES:
+        return ["loaded table expectation must cover exactly the three input tables"]
+    for table, spec in tables.items():
+        if not isinstance(spec, dict) or set(spec) != {"num_rows", "num_bytes"} or not all(
+                type(spec[k]) is int and spec[k] > 0 for k in spec):
+            return [f"loaded table expectation for {table} is malformed"]
+    return []
+
+
+def _is_int(value: object, want: int) -> bool:
+    return type(value) is int and value == want
+
+
+def loaded_drift_problems(rc: dict, planned: datetime | None, spec: dict) -> list[str]:
+    """One input table's refresh drift after the load: only rows, bytes, etag and time."""
+    addr = rc.get("address")
+    change = rc.get("change") or {}
+    before, after = change.get("before"), change.get("after")
+    if rc.get("mode", "managed") != "managed" or rc.get("type") != "google_bigquery_table":
+        return [f"drift detected outside Terraform: {addr}"]
+    if change.get("actions") != ["update"]:
+        return [f"drift detected outside Terraform: {addr} {change.get('actions')}"]
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        return [f"{addr}: drift lacks before/after values"]
+    if set(before) != set(after):
+        return [f"{addr}: drift attribute sets differ"]
+    if _has_unknown(change.get("after_unknown")):
+        return [f"{addr}: drift has unknown values"]
+    changed = {k for k in before if before[k] != after[k]}
+    problems = []
+    if changed - LOADED_DRIFT_ATTRS:
+        problems.append(f"{addr}: drift changes non-load attributes: "
+                        f"{sorted(changed - LOADED_DRIFT_ATTRS)}")
+    if not LOADED_DRIFT_ATTRS <= changed:
+        problems.append(f"{addr}: a load must change num_rows, num_bytes, etag and "
+                        "last_modified_time together")
+    if not (_is_int(before.get("num_rows"), 0) and _is_int(before.get("num_bytes"), 0)):
+        problems.append(f"{addr}: drift does not start from an empty table")
+    if not (_is_int(after.get("num_rows"), spec["num_rows"])
+            and _is_int(after.get("num_bytes"), spec["num_bytes"])):
+        problems.append(f"{addr}: rows or logical bytes differ from the approved packet")
+    if not all(isinstance(v, str) and v for v in (before.get("etag"), after.get("etag"))):
+        problems.append(f"{addr}: etag is not a non-empty string")
+    if "last_modified_time" in changed:
+        issue = _timestamp_moved_forward("last_modified_time", before["last_modified_time"],
+                                         after["last_modified_time"], planned, _epoch_ms)
+        if issue:
+            problems.append(f"{addr}: {issue}")
+    return problems
+
+
+def _check_loaded_sizes(rc: dict, loaded: dict, problems: list[str]) -> None:
+    """Every table's refreshed size: inputs exactly the packet, marts empty."""
+    if rc.get("type") != "google_bigquery_table":
+        return
+    addr = rc["address"]
+    values = rc["change"].get("before") or {}
+    key = re.fullmatch(r'module\.bigquery\.google_bigquery_table\.products\["([a-z_]+)"\]',
+                       addr)
+    spec = loaded["tables"].get(key.group(1)) if key else None
+    want = {"num_rows": 0, "num_bytes": 0} if spec is None else spec
+    for name in TABLE_SIZE_ATTRS:
+        if not _is_int(values.get(name), want.get(name, 0)):
+            problems.append(f"{addr}: refreshed {name} is not the approved post-load value")
+
+
+def _check_pilot(plan: dict, mode: str = "pilot", owner: object = None,
+                 loaded: object = None) -> dict:
     """``pilot``: 18 creates. ``pilot-recovery`` (M6T): after the partial apply, the 17
     created resources are unchanged and the only change is one create of the dataset policy."""
     problems: list[str] = list(dataset_owner_problems(owner))
@@ -834,9 +920,21 @@ def _check_pilot(plan: dict, mode: str = "pilot", owner: object = None) -> dict:
     accepted_metadata_drift: list[str] = []
     seen: set[str] = set()
     planned = _parse_utc(plan.get("timestamp"))
+    load_problems = loaded_expectation_problems(loaded) if mode == "pilot-loaded" else []
+    problems.extend(load_problems)
+    loaded_addresses = ({_table_address(t): t for t in READER_TABLES}
+                        if mode == "pilot-loaded" and not load_problems else {})
+    accepted_load_drift: list[str] = []
     for rc in plan.get("resource_drift") or []:
         addr = rc.get("address")
-        if mode == "pilot-recovery" and addr in PILOT_METADATA_DRIFT and addr not in seen:
+        if addr in loaded_addresses and addr not in seen:
+            seen.add(addr)
+            drift_problems = loaded_drift_problems(rc, planned,
+                                                   loaded["tables"][loaded_addresses[addr]])
+            problems.extend(drift_problems)
+            if not drift_problems:
+                accepted_load_drift.append(addr)
+        elif mode == "pilot-recovery" and addr in PILOT_METADATA_DRIFT and addr not in seen:
             seen.add(addr)
             drift_problems = pilot_metadata_drift_problems(rc, planned)
             problems.extend(drift_problems)
@@ -844,9 +942,16 @@ def _check_pilot(plan: dict, mode: str = "pilot", owner: object = None) -> dict:
                 accepted_metadata_drift.append(addr)
         else:
             problems.append(f"drift detected outside Terraform: {addr}")
-    report = _classify(plan, problems, lambda rc: _check_pilot_values(rc, problems, owner))
+    def check(rc: dict) -> None:
+        _check_pilot_values(rc, problems, owner)
+        if mode == "pilot-loaded" and not load_problems:
+            _check_loaded_sizes(rc, loaded, problems)
+
+    report = _classify(plan, problems, check)
     if mode == "pilot":
         _compare(report, pilot_addresses(), set(), set(), problems)
+    elif mode == "pilot-loaded":
+        _compare(report, set(), pilot_addresses(), set(), problems)
     else:
         _compare(report, {DATASET_POLICY}, pilot_addresses() - {DATASET_POLICY}, set(),
                  problems)
@@ -855,18 +960,34 @@ def _check_pilot(plan: dict, mode: str = "pilot", owner: object = None) -> dict:
     _forbid(plan, PILOT_FORBIDDEN, problems, PILOT_SCAN_KEYS)
     if mode == "pilot-recovery":
         report["accepted_metadata_drift"] = sorted(accepted_metadata_drift)
+    if mode == "pilot-loaded":
+        report["accepted_load_drift"] = sorted(accepted_load_drift)
+        report["packet_id"] = loaded.get("packet_id") if isinstance(loaded, dict) else None
     report.update(mode=mode, dataset_owner_approved=not dataset_owner_problems(owner),
                   problems=problems, ok=not problems)
     return report
 
 
 def check_plan(plan: dict, mode: str, iam: Path = IAM, dataset_owner: object = None,
-               packet_id: object = None, bucket: object = None) -> dict:
+               packet_id: object = None, bucket: object = None,
+               loaded: object = None) -> dict:
     if mode not in MODES:
         raise ValueError(f"unknown mode: {mode}")
     if mode in PILOT_MODES:
-        return _check_pilot(plan, mode, dataset_owner)
+        return _check_pilot(plan, mode, dataset_owner, loaded)
     return _check_bootstrap(plan, mode, iam, packet_id, bucket)
+
+
+def loaded_tables(packet_dir: object, manifest_sha256: object) -> dict:
+    """Verify the packet (M7B verifier) and derive the exact post-load table sizes."""
+    if packet_dir is None or manifest_sha256 is None:
+        raise ValueError("pilot-loaded requires --packet-dir and --expected-manifest-sha256")
+    source = str(REPO / "src")
+    if source not in sys.path:
+        sys.path.insert(0, source)
+    from financial_crime_ml.deployment.ingestion_bundle import loaded_table_expectations
+
+    return loaded_table_expectations(Path(packet_dir), str(manifest_sha256))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -879,7 +1000,22 @@ def main(argv: list[str] | None = None) -> int:
                         help="loader-access: the approved M7B packet ID (m7p-<24 hex>)")
     parser.add_argument("--bucket", default=None,
                         help="loader-access: the approved pilot bucket (never printed)")
+    parser.add_argument("--packet-dir", default=None,
+                        help="pilot-loaded: the approved, loaded M7B packet directory")
+    parser.add_argument("--expected-manifest-sha256", default=None,
+                        help="pilot-loaded: the approved packet manifest SHA-256")
     args = parser.parse_args(argv)
+    loaded = None
+    if args.mode == "pilot-loaded":
+        try:
+            loaded = loaded_tables(args.packet_dir, args.expected_manifest_sha256)
+        except (ValueError, OSError, KeyError, TypeError, ImportError) as exc:
+            print(json.dumps({"ok": False, "problems": [f"packet not verified: {exc}"]}))
+            return 2
+    elif args.packet_dir is not None or args.expected_manifest_sha256 is not None:
+        print(json.dumps({"ok": False, "problems": [
+            "--packet-dir/--expected-manifest-sha256 apply only to pilot-loaded"]}))
+        return 2
     try:
         plan = json.load(sys.stdin)
         if not isinstance(plan, dict):
@@ -888,7 +1024,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"ok": False, "problems": [f"invalid plan JSON: {exc}"]}))
         return 2
     report = check_plan(plan, args.mode, dataset_owner=args.dataset_owner,
-                        packet_id=args.packet_id, bucket=args.bucket)
+                        packet_id=args.packet_id, bucket=args.bucket, loaded=loaded)
     print(json.dumps(report, indent=2))
     return 0 if report["ok"] else 1
 

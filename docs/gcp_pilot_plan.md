@@ -15,7 +15,7 @@ This runbook governs pilot infrastructure/workload operations. All cloud and Ter
 | Gate B: infrastructure | **Complete.** All **18 pilot resources deployed**: 17 in M6S, and the dataset IAM policy in the M6T recovery (1 created, 0 changed, 0 destroyed). Dataset access read back as named user OWNER plus the runner's metadata role only ([M6T](upgrade/m6t_validation.md)) |
 | Provisioner access | **Revoked** (2 grants destroyed); impersonation denied afterwards; temporary access-window input removed |
 | State backups | Pilot serial 21 and bootstrap serial 26, encrypted and verified after a OneDrive round-trip |
-| Gate C: synthetic workload | **Not started.** Tables are empty; no upload, load or query. M7 prepares it offline |
+| Gate C: synthetic workload | **Not started.** Tables are empty; no upload, load or query. Input-table ingestion prepared offline (M7B packet, M7C1 loader identity, M7C2 bundle, verifiers and [M7D runbook](upgrade/m7d_runbook.md)); runs only as a separately authorised M7D |
 | Gate D: cleanup | Not started; resources remain under deletion protection |
 
 Open limitations, including the unmapped numeric service-account identity in the 8 `GenerateAccessToken` audit entries, are listed in [M6T](upgrade/m6t_validation.md#outstanding-limitations). **This pilot is not production-ready and performs no cloud data ingestion.**
@@ -42,26 +42,84 @@ Capture resource IDs, effective IAM (including inheritance), schema exports and 
 
 ## Gate C: bounded synthetic workload
 
-Approve the exact M2/M3/M4 local run manifests and hashes; source row counts and per-currency values; rendered target identifiers and SQL hash; three load schemas; object generation naming; idempotency/job IDs; the runtime and temporary provisioning/load identities and grants; limits from `pilot_controls.json`; and a 24-hour window. Source data must be synthetic, with at most 5,000 accepted transactions and 10 MiB uploaded. If a source is partially accepted, explicitly approve its quarantine totals; do not upload rejects as curated observations. Use local M3/M4 checks again immediately before upload, and preserve all 43 historical samples.
+**Rewritten in M7C2 (2026-11-13).** Gate C now has two parts:
+- **C-inputs (M7):** load the three input tables. Prepared offline; it runs only as M7D, under the [M7D runbook](upgrade/m7d_runbook.md).
+- **C-marts (M8):** build the four marts. Not prepared; **not authorised**.
 
-The future operator/executor must:
+The earlier text named the provisioner as uploader and loader. That contradicted its M6K role, which has no data or job permissions, and has been removed (gap G7).
 
-1. After explicit approval of the temporary provisioning/load grants described below, impersonate the provisioner to upload selected M3 inputs and evidence to unique run-prefixed object names with a create-only generation precondition (`ifGenerationMatch=0`). Verify object generations, checksums and manifest SHA256; bucket versioning is not a substitute for immutable naming. Retain M3 raw/validated/curated/quarantine evidence only within the approved total bytes; inventory the chosen files before upload. Large M4 SQLite/lineage payloads can remain in approved local evidence; do not upload the whole runs tree blindly. No remote M3 processor is implemented.
-2. After separate approval of temporary provisioning/load grants (project jobs role, bucket objects role, table data role on the three inputs), impersonate the provisioner for initial CSV loading. Its provisioning permissions include table create/update; the runner intentionally lacks these load-job permissions. Load **only** `curated/transactions.csv`, `validated/customers.csv` and `validated/accounts.csv` into the pre-created corresponding tables. Use explicit `source_tables.json` schemas, CSV header skip=1, strict required fields/column order, no autodetection, no ignored unknown fields and max bad records=0. Specify the exact region, approved GCS generation/content hashes and no schema updates. Use `CREATE_NEVER` and `WRITE_EMPTY` for initial loads. Capture idempotent job IDs and configuration/input hashes; before retrying, retrieve the existing job and confirm both. Do not re-upload/reload blindly. A different snapshot requires a separately approved environment/refresh plan.
-3. Verify all three load row counts, unique entity/transaction keys, required fields, account/customer foreign keys, ownership, first-event chronology, snapshot/ingestion ordering, canonical amount strings/minor units and currency-specific values against M3. BigQuery does not enforce every M3 rule. Stop on a mismatch, null, rejected load row or extra table.
-4. Revoke all temporary provisioning/load data/job grants and provisioning impersonation access, capture evidence, and switch to the restricted runtime identity. Do not reapply authoritative resource policies while temporary grants are in use. Render only the approved project/dataset identifiers into `marts.v1.insert.proposed.sql` (identifiers cannot be query parameters). Validate/estimate the four SELECT bodies individually before DML because script dry-runs have limitations. Require exact expected fields/grains and no approximation. Set `maximum_bytes_billed=104857600` on each applicable job and keep a cumulative job/bytes ledger; if unsupported or exceeded, stop for review. Sequentially execute the transactional script to replace only the four pilot marts. Reuse a stable job ID/hash for an identical retry and inspect its prior status. No new cloud execution wrapper is implemented by M5.
-5. Reconcile every mart's transaction count and minor-unit sum **per currency** against M3 and M4. Compare every grain's counts, exact sums, distinct active entities, first/last UTC instants, joins and required fields; check duplicate grains and anti-joins. Do not require cloud CSV/BigQuery storage hashes to match SQLite bytes. Sort and normalize DATE/TIMESTAMP/INT64 representations before logical comparison. Exercise empty-input/duplicate/null/error cases in an approved disposable environment before claiming cloud parity.
-6. Capture redacted load/query job configurations, IDs, parent/child job results, location, bytes processed/billed/cache status, output schema/row counts, reconciliation/quality results, exact SQL and hashes, object generations, source lineage and actual start/end times. Store under the approved run prefix with create-only names and record an evidence inventory. No cloud success is claimed until all checks pass; mark incomplete results explicitly.
+### C-inputs: synthetic input-table ingestion (M7D)
 
-Storage load URIs must be exact `gs://bucket/unique-run/path.csv` names without wildcards or generation suffixes. **BigQuery rejects generation-qualified load URIs.** Freeze the unique names for the full load interval, prohibit all writers with overwrite/delete rights during that interval, and verify generation/size/checksum before and after each load. Stop on any change. Runtime and the temporary object role lack delete rights, which prevents overwriting an existing object; administrative inherited rights still require review. Object versioning provides recovery, not generation pinning for BigQuery. [CSV load limitations](https://docs.cloud.google.com/bigquery/docs/loading-data-cloud-storage-csv).
+**Identities:**
+- **Loader:** the dedicated keyless account `bankpilot-dev-loader` (bootstrap root, [M7C1](upgrade/m7c1_validation.md)) uploads and loads. During one approved window of at most 8 hours (3 hours recommended), it holds only six expiring grants:
+  - `bigquery.jobs.create` on the project;
+  - create-only `storage.objects.create`/`get`, narrowed by condition to `m7/ingestion/<packet_id>/` in the pilot bucket;
+  - `tables.get`/`getData`/`updateData` on `customers`, `accounts` and `curated_transactions` only;
+  - operator token minting on the loader account.
+- **Provisioner:** keeps no access.
+- **Runner:** unchanged and read-only on the inputs.
+- **Pilot policies:** the bucket and dataset policies (authoritative) are never edited for the loader.
 
-For reconciliation acquisition, prefer complete, paginated `tabledata.list` reads of all seven tables plus `tables.get` metadata under the appropriate approved identity. Read input tables during the load verification and all tables under the runner after the transaction; no writer may run during acquisition. These API reads need existing get/getData permissions, not `bigquery.tables.export`, and do not create query jobs. Serialize explicitly by schema column order to the seven named CSV files documented in the readiness design, preserving STRING/INT64 values. Convert REST epoch-second TIMESTAMP fields to explicit UTC strings using exact decimal arithmetic; never pass them through float. Record pagination completion, table row counts/schema and hashes, then run the implemented offline comparator against the exact approved M3/M4 runs. No downloader is implemented by M5. Any acquisition via SELECT/extract instead needs a revised job/permission review; extraction permission is deliberately absent.
+**Approvals** (exact values pinned; see the [M7D runbook §1](upgrade/m7d_runbook.md#1-approvals-each-recorded-separately-before-its-step)):
+1. the code commit;
+2. the [M7B](upgrade/m7b_validation.md) packet manifest SHA-256 (4,000 synthetic transactions, about 1.1 MB, label-free, no local paths);
+3. the `loader-identity` plan SHA-256;
+4. the window;
+5. the `loader-access` plan SHA-256;
+6. the operator command bundle SHA-256;
+7. the cost envelope;
+8. optional read probes;
+9. the `loader-revoke` plan SHA-256;
+10. the `pilot-loaded` plan SHA-256 (not applied);
+11. closure.
 
-The 20-job/request limit includes parent/child jobs, load jobs and dry-run requests; use a conservative reservation: 3 loads + 4 SELECT dry runs + 1 script dry run + 1 script parent + up to 10 script child jobs = 19, leaving at most one additional query request. Enumerate actual child jobs; do not assume BEGIN/COMMIT are free of ledger entries. Perform source/mart value checks locally from complete exports instead of adding unbounded quality queries. Abort before launch if the reviewed request budget cannot fit. If BigQuery produces a different number of children, stop further work and record the discrepancy. Keep a separate cumulative billed-bytes ledger: script parent totals may summarize child totals, so avoid double counting while retaining both records. The 100 MiB query setting is not a guaranteed whole-script cap; approve per-statement estimates and a full-run worst-case byte envelope before execution. [Script dry-run limitations](https://docs.cloud.google.com/bigquery/docs/multi-statement-queries).
+**Execution** is the M7C2 bundle (`render-ingestion-bundle`), run step by step by the operator in Terminal.app:
+1. **Pre-checks:** the bundle and packet re-verify against their approved hashes. The loader token mints. The three tables are read back empty with the exact packet schema.
+2. **Upload:** three create-only XML API uploads (`x-goog-if-generation-match: 0`, `Content-MD5` checked server-side) to the packet's content-addressed names. The object metadata is captured and verified: generation, metageneration 1, size, MD5, CRC32C, `text/csv`, no encoding, holds, retention or custom metadata.
+3. **Load:** exactly three load jobs, each with its immutable packet job ID (`m7_load_<id>_<table>`). Settings: explicit `source_tables.json` schema, CSV with one header row skipped, no autodetect, `maxBadRecords=0`, no jagged rows or quoted newlines, no ignored values or schema updates, `CREATE_NEVER` and `WRITE_EMPTY`. Each job is submitted once:
+   - HTTP 409 (ID exists) or a transport error stops the step;
+   - a corrected packet gets a new ID.
 
-Runtime permission errors must be investigated against the approved IAM table. No automatic role widening, quota increase, scan-limit increase, schema relaxation or service enablement is authorized. The design depends on manual enforcement; implementing a cloud executor is separate work.
+   **BigQuery rejects generation-qualified load URIs**, so object generations are verified before and after the loads instead.
+4. **Verification:** the captured jobs must be `DONE`, submitted by the loader, with every setting as requested, output rows equal to the packet, 0 bad records and no query statistics.
+5. **Read-back:** full `tabledata.list` pagination with exact int64-microsecond timestamps. Each table is rebuilt **byte-identical to its packet file (same SHA-256)**; row identities, values and per-currency totals reconcile; no writer runs during acquisition.
+6. **Revocation:** apply the `loader-revoke` plan, back up state, read back. Then the pilot plan check `pilot-loaded`, which accepts only the exact row and logical-byte drift on the input tables.
 
-Acquire table pages using the documented [tabledata.list interface](https://docs.cloud.google.com/bigquery/docs/reference/rest/v2/tabledata/list). For child-job evidence, use [jobs.list](https://docs.cloud.google.com/bigquery/docs/reference/rest/v2/jobs/list) with `parentJobId`, `allUsers=false` and full pagination while impersonating the identity that submitted the parent. It may list its own jobs without broad project job-history access; no jobs-listAll grant is proposed. Preserve evidence for load jobs under the provisioner before revoking that phase's access. Stop for review if the selected client requires additional permissions.
+**Cloud Storage checksums.** Cloud Storage reports MD5 and CRC32C, not SHA-256. These are transfer checks only; SHA-256 equivalence comes from the read-back rebuild.
+
+**Limits:**
+- ≤ 5,000 transactions;
+- ≤ 10 MiB uploaded;
+- 3 jobs out of the 20 allowed;
+- 0 query bytes;
+- the £5 budget alerts **are not caps**.
+
+**Stop rules:** stop on any permission error, unexpected value or extra job. Never widen a role, retry with different settings, or delete inside the window. A wrong but successful load is recovered only by a separately reviewed operation (M7A G9).
+
+### C-marts: mart processing (M8; not prepared, not authorised)
+
+The following design is retained for M8 and needs its own review, identity decision and approvals. **The runner**, not the loader or provisioner, would execute it after all loader access is revoked.
+
+- **Rendering and validation:** render only the approved project/dataset identifiers into `marts.v1.insert.proposed.sql` (identifiers cannot be query parameters). Validate and estimate the four SELECT bodies individually before DML, because script dry runs have limitations. Require exact expected fields and grains, with no approximation.
+- **Byte and job ledger:**
+  - set `maximum_bytes_billed=104857600` on each applicable job, and keep a cumulative job and bytes ledger;
+  - if a limit is unsupported or exceeded, stop for review;
+  - execute the transactional script sequentially, replacing only the four pilot marts;
+  - reuse a stable job ID/hash for an identical retry, and inspect its prior status.
+- **Reconciliation:**
+  - reconcile every mart's transaction count and minor-unit sum **per currency** against M3 and M4;
+  - compare every grain's counts, exact sums, distinct active entities, first/last UTC instants, joins and required fields;
+  - check duplicate grains and anti-joins;
+  - sort and normalise DATE/TIMESTAMP/INT64 representations before comparing; do not require cloud storage hashes to match SQLite bytes;
+  - use the existing seven-table comparator (`deployment/reconcile.py`) with mart read-backs acquired by `tabledata.list` under the runner.
+- **Job reservation:** the 20-job limit includes parent and child jobs and dry runs. M7 uses 3; a conservative M8 reservation is 4 SELECT dry runs + 1 script dry run + 1 script parent + up to 10 child jobs. Enumerate the actual child jobs, and stop if BigQuery produces a different number. [Script dry-run limitations](https://docs.cloud.google.com/bigquery/docs/multi-statement-queries).
+- **Evidence:** capture redacted job configurations, IDs, parent/child results, bytes processed and billed, cache status, output schemas and row counts, exact SQL and hashes, and actual start/end times.
+- **No widening:** runtime permission errors are investigated against the approved IAM table. No automatic role widening, quota or scan-limit increase, schema relaxation or service enablement is authorised.
+
+References:
+- [CSV load limitations](https://docs.cloud.google.com/bigquery/docs/loading-data-cloud-storage-csv)
+- [tabledata.list](https://docs.cloud.google.com/bigquery/docs/reference/rest/v2/tabledata/list)
+- [jobs.list](https://docs.cloud.google.com/bigquery/docs/reference/rest/v2/jobs/list), with `parentJobId` and `allUsers=false` for child jobs under the submitting identity
 
 ## Gate D: cleanup and residual billing
 
