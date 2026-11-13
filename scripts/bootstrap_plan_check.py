@@ -24,12 +24,29 @@ Bootstrap root modes:
 M7C1 loader modes (bootstrap root; provisioner access must stay disabled):
   loader-identity  The 11 bootstrap resources unchanged; exactly 4 creates: the keyless loader
                    account and its three custom roles (infrastructure/iam/loader_roles.json).
-  loader-access    The 15 resources unchanged; exactly 6 expiring creates: loader jobs (project)
-                   and objects (project, packet-prefix condition) grants, three input-table
-                   members and operator token minting on the loader account. Requires
+  loader-access    The 15 resources unchanged; exactly 6 creates: loader jobs (project) and
+                   objects (project, packet-prefix condition) grants and operator token
+                   minting on the loader account, each with the exact approved expiry; and
+                   three UNCONDITIONAL input-table members (M7D correction: BigQuery rejects
+                   conditional table bindings, so any table condition is a problem). Requires
                    --packet-id=m7p-<24 hex> and --bucket=<pilot bucket> (never printed).
   loader-revoke    Loader access disabled; the 15 resources unchanged and the six grants
                    deleted (or already removed outside Terraform).
+  loader-recovery  M7D incident only: after a partially failed loader-access apply in which
+                   the table grants were rejected and never created. Loader access disabled;
+                   the 15 resources unchanged; no table grant anywhere in the plan or drift;
+                   each of the three expiring grants (jobs, objects, token minting) is either
+                   deleted, already removed outside Terraform, or absent from state. Nothing is
+                   created. A fully clean state (15 unchanged, nothing else) also passes.
+  loader-revoke-partial
+                   M7D: after a loader-revoke (or loader-access) apply that failed part-way.
+                   Loader access disabled; the 15 resources unchanged; nothing created or
+                   updated; each of the six grants is either deleted (with its exact approved
+                   shape: expiring condition on jobs, objects and token minting; no condition
+                   on the three input tables), already removed outside Terraform, or absent
+                   from state. At least one grant must be absent from state: a plan in which
+                   all six are still recorded is a normal revocation and must use the strict
+                   loader-revoke mode. Live IAM read-back afterwards is mandatory.
 
 Pilot root modes (both require --dataset-owner=user:<approved owner>; M6T):
   pilot           First pilot deployment: exactly 18 creates (bucket, dataset, 7 tables, two
@@ -94,7 +111,8 @@ PILOT_SCAN_KEYS = ("variables", "resource_changes", "resource_drift", "output_ch
                    "configuration")
 READER_TABLES = {"curated_transactions", "customers", "accounts"}
 M6_BOOTSTRAP_MODES = ("initial", "recovery", "access", "revoke")
-LOADER_MODES = ("loader-identity", "loader-access", "loader-revoke")
+LOADER_MODES = ("loader-identity", "loader-access", "loader-revoke", "loader-recovery",
+                "loader-revoke-partial")
 BOOTSTRAP_MODES = (*M6_BOOTSTRAP_MODES, *LOADER_MODES)
 PILOT_MODES = ("pilot", "pilot-recovery", "pilot-loaded")
 MODES = (*BOOTSTRAP_MODES, *PILOT_MODES)
@@ -111,6 +129,13 @@ LOADER_TABLE_GRANTS = frozenset(f'google_bigquery_table_iam_member.loader["{t}"]
 LOADER_IMPERSONATION = "google_service_account_iam_member.operator_loader_impersonation[0]"
 LOADER_GRANTS = frozenset({LOADER_JOBS_GRANT, LOADER_OBJECTS_GRANT, *LOADER_TABLE_GRANTS,
                            LOADER_IMPERSONATION})
+# M7D incident: the grants a partially failed loader-access apply could have created (the
+# table bindings were rejected by BigQuery). loader-recovery uses this set.
+LOADER_EXPIRING_GRANTS = frozenset({LOADER_JOBS_GRANT, LOADER_OBJECTS_GRANT,
+                                    LOADER_IMPERSONATION})
+# Partial-state modes: the only grants each may delete, find already removed, or find absent.
+PARTIAL_GRANTS = {"loader-recovery": LOADER_EXPIRING_GRANTS,
+                  "loader-revoke-partial": LOADER_GRANTS}
 LOADER_OFF = {"loader_access_enabled": False, "loader_access_expiry": None,
               "loader_bucket_name": None, "loader_object_prefix": None}
 PACKET_ID_RE = re.compile(r"^m7p-[0-9a-f]{24}$")
@@ -279,7 +304,11 @@ def _check_values(rc: dict, roles: dict[str, set[str]], problems: list[str],
             problems.append(f"{addr}: unexpected role")
         if values.get("member") != LOADER_MEMBER:
             problems.append(f"{addr}: member is not the loader service account")
-        _check_loader_condition(addr, values, ctx, "expiry", problems)
+        # M7D correction: BigQuery rejected IAM conditions on table bindings, so the table
+        # members are unconditional. Any condition (expiring or not) is refused, so a plan
+        # can never again depend on a table condition the service does not accept.
+        if "condition" not in values or values["condition"] not in (None, []):
+            problems.append(f"{addr}: table grant must be unconditional (no condition block)")
     elif kind == "google_service_account_iam_member" and name == "operator_loader_impersonation":
         if values.get("service_account_id") != (
                 f"projects/{PROJECT}/serviceAccounts/{LOADER_EMAIL}"):
@@ -460,6 +489,11 @@ LOADER_ETAG_DRIFT_BY_MODE = {
     "loader-access": frozenset({RUNNER_GRANT, AUDIT_ADDRESS}),
     "loader-revoke": frozenset({RUNNER_GRANT, AUDIT_ADDRESS, LOADER_JOBS_GRANT,
                                 LOADER_OBJECTS_GRANT}),
+    # M7D incident: the same set as loader-revoke, nothing more.
+    "loader-recovery": frozenset({RUNNER_GRANT, AUDIT_ADDRESS, LOADER_JOBS_GRANT,
+                                  LOADER_OBJECTS_GRANT}),
+    "loader-revoke-partial": frozenset({RUNNER_GRANT, AUDIT_ADDRESS, LOADER_JOBS_GRANT,
+                                        LOADER_OBJECTS_GRANT}),
 }
 
 
@@ -528,6 +562,9 @@ def _check_bootstrap(plan: dict, mode: str, iam: Path, packet_id: object = None,
         "loader-identity": (loader_identity, existing, set()),
         "loader-access": (LOADER_GRANTS, existing | loader_identity, set()),
         "loader-revoke": (set(), existing | loader_identity, LOADER_GRANTS),
+        # Deletes are restricted further below to the expiring grants present in the plan.
+        "loader-recovery": (set(), existing | loader_identity, set()),
+        "loader-revoke-partial": (set(), existing | loader_identity, set()),
     }[mode]
     expected_vars = dict(EXPECTED_VARIABLES, provisioner_access_enabled=(mode == "access"))
     _check_variables(variables, expected_vars, problems)
@@ -554,7 +591,9 @@ def _check_bootstrap(plan: dict, mode: str, iam: Path, packet_id: object = None,
         if addr in seen:
             problems.append(f"drift detected outside Terraform: {addr} (duplicate)")
         elif ((mode == "revoke" and addr in ACCESS_ADDRESSES)
-              or (mode == "loader-revoke" and addr in LOADER_GRANTS)) and actions == ["delete"]:
+              or (mode == "loader-revoke" and addr in LOADER_GRANTS)
+              or (mode in PARTIAL_GRANTS and addr in PARTIAL_GRANTS[mode])
+              ) and actions == ["delete"]:
             seen.add(addr)
             already_removed.add(addr)
         elif addr in tolerated:
@@ -565,6 +604,22 @@ def _check_bootstrap(plan: dict, mode: str, iam: Path, packet_id: object = None,
                 etag_drift.append(addr)
         else:
             problems.append(f"drift detected outside Terraform: {addr}")
+    absent: set[str] = set()
+    if mode in PARTIAL_GRANTS:
+        # Each permitted grant still recorded in state must be deleted; one absent from state
+        # (never created, or already removed by an earlier apply) needs nothing. Any other
+        # grant (for loader-recovery: the table grants) is never permitted anywhere.
+        grants = PARTIAL_GRANTS[mode]
+        changes = plan.get("resource_changes") or []
+        want_delete = {rc.get("address") for rc in changes if rc.get("address") in grants
+                       and (rc.get("change") or {}).get("actions") == ["delete"]}
+        absent = set(grants) - already_removed - {rc.get("address") for rc in changes}
+        # A grant whose stored etag drifted is still in state, so it must be deleted here.
+        for addr in sorted(set(etag_drift) & grants - want_delete):
+            problems.append(f"{addr}: drifted grant is in state but not deleted")
+        if mode == "loader-revoke-partial" and not absent:
+            problems.append("all six loader grants are still in state: this is a complete "
+                            "revocation; use --mode loader-revoke")
     want_delete = want_delete - already_removed  # never mutate the module constants
     report = _classify(plan, problems, lambda rc: _check_values(rc, roles, problems, ctx))
     _compare(report, want_create, want_noop, want_delete, problems)
@@ -573,9 +628,12 @@ def _check_bootstrap(plan: dict, mode: str, iam: Path, packet_id: object = None,
     if mode == "access":
         report.update(access_expiry=ctx.get("expiry"), window_hours=ctx.get("window_hours"),
                       accepted_etag_drift=sorted(etag_drift))
-    if mode in ("revoke", "loader-revoke"):
+    if mode in ("revoke", "loader-revoke", *PARTIAL_GRANTS):
         report.update(already_removed=sorted(already_removed),
                       accepted_etag_drift=sorted(etag_drift))
+    if mode in PARTIAL_GRANTS:
+        report["absent_from_state"] = sorted(absent)
+        report["live_iam_readback_required"] = True
     if mode in ("loader-identity", "loader-access"):
         report["accepted_etag_drift"] = sorted(etag_drift)
     if mode == "loader-access":

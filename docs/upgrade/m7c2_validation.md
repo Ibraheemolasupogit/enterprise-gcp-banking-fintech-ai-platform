@@ -243,7 +243,7 @@ The mode requires `--dataset-owner`, `--packet-dir` and `--expected-manifest-sha
 | R6 | The bundle does not pin the code commit (D5) | Modified local verifier code could weaken checks | Clean checkout at A1; CI |
 | R7 | Evidence and bundle contain the bucket name | Disclosure if copied out of custody | Custody only; only the redacted `report.json` leaves it |
 | R8 | The fake cloud models documented behaviour, not Google's implementation | Shape or semantic differences surface only live | Fail-closed verifiers; stop rules |
-| R9 | Carried from M6/M7C1: unrestricted project Owner, personal-account dataset owner, alerts that are not caps, BigQuery table-condition support (Q1/Q2), storage prefix condition (Q3), load permission set (Q4) | See [M7C1](m7c1_validation.md#unresolved-provider-and-api-questions) | L0–L7 |
+| R9 | Carried from M6/M7C1: unrestricted project Owner, personal-account dataset owner, alerts that are not caps, BigQuery table-condition support (Q1/Q2: **rejected at the M7D apply**; table grants now unconditional, see the [incident](m7d_incident_table_iam.md)), storage prefix condition (Q3), load permission set (Q4) | See [M7C1](m7c1_validation.md#unresolved-provider-and-api-questions) | L0–L7 |
 
 ## Precise M7D approval gates
 

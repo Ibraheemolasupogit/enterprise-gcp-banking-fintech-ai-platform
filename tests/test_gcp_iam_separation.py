@@ -284,7 +284,9 @@ def test_loader_identity_and_access_are_gated_off_by_default():
         assert re.search(r"^\s*count\s+= local\.loader_access_count$", body, re.M)
         assert "condition {" in body
     tables = block(text, "google_bigquery_table_iam_member", "loader")
-    assert "for_each   = local.loader_tables" in tables and "condition {" in tables
+    # M7D correction: BigQuery rejected conditional table bindings; the table members are
+    # unconditional and are ended by the loader-revoke apply (see the incident document).
+    assert "for_each   = local.loader_tables" in tables and "condition" not in tables
     assert ('loader_tables         = var.loader_access_enabled ? toset(["accounts", '
             '"curated_transactions", "customers"]) : toset([])') in text
     variables = (BOOTSTRAP / "variables.tf").read_text()

@@ -15,7 +15,7 @@ This runbook governs pilot infrastructure/workload operations. All cloud and Ter
 | Gate B: infrastructure | **Complete.** All **18 pilot resources deployed**: 17 in M6S, and the dataset IAM policy in the M6T recovery (1 created, 0 changed, 0 destroyed). Dataset access read back as named user OWNER plus the runner's metadata role only ([M6T](upgrade/m6t_validation.md)) |
 | Provisioner access | **Revoked** (2 grants destroyed); impersonation denied afterwards; temporary access-window input removed |
 | State backups | Pilot serial 21 and bootstrap serial 26, encrypted and verified after a OneDrive round-trip |
-| Gate C: synthetic workload | **Not started.** Tables are empty; no upload, load or query. Input-table ingestion prepared offline (M7B packet, M7C1 loader identity, M7C2 bundle, verifiers and [M7D runbook](upgrade/m7d_runbook.md)); runs only as a separately authorised M7D |
+| Gate C: synthetic workload | **Not started.** Tables are empty; no upload, load or query. Input-table ingestion prepared offline (M7B packet, M7C1 loader identity, M7C2 bundle, verifiers and [M7D runbook](upgrade/m7d_runbook.md)); runs only as a separately authorised M7D. The first M7D `loader-access` apply partially failed and was recovered; the table-IAM correction is implemented offline ([incident](upgrade/m7d_incident_table_iam.md)) |
 | Gate D: cleanup | Not started; resources remain under deletion protection |
 
 Open limitations, including the unmapped numeric service-account identity in the 8 `GenerateAccessToken` audit entries, are listed in [M6T](upgrade/m6t_validation.md#outstanding-limitations). **This pilot is not production-ready and performs no cloud data ingestion.**
@@ -51,11 +51,11 @@ The earlier text named the provisioner as uploader and loader. That contradicted
 ### C-inputs: synthetic input-table ingestion (M7D)
 
 **Identities:**
-- **Loader:** the dedicated keyless account `bankpilot-dev-loader` (bootstrap root, [M7C1](upgrade/m7c1_validation.md)) uploads and loads. During one approved window of at most 8 hours (3 hours recommended), it holds only six expiring grants:
-  - `bigquery.jobs.create` on the project;
-  - create-only `storage.objects.create`/`get`, narrowed by condition to `m7/ingestion/<packet_id>/` in the pilot bucket;
-  - `tables.get`/`getData`/`updateData` on `customers`, `accounts` and `curated_transactions` only;
-  - operator token minting on the loader account.
+- **Loader:** the dedicated keyless account `bankpilot-dev-loader` (bootstrap root, [M7C1](upgrade/m7c1_validation.md)) uploads and loads. During one approved window of at most 8 hours (3 hours recommended), it holds only six grants, all removed by the `loader-revoke` apply:
+  - `bigquery.jobs.create` on the project (expiring);
+  - create-only `storage.objects.create`/`get`, narrowed by condition to `m7/ingestion/<packet_id>/` in the pilot bucket (expiring);
+  - `tables.get`/`getData`/`updateData` on `customers`, `accounts` and `curated_transactions` only. These are **unconditional**, because BigQuery rejected conditional table bindings ([M7D incident](upgrade/m7d_incident_table_iam.md)). They end only at revocation;
+  - operator token minting on the loader account (expiring).
 - **Provisioner:** keeps no access.
 - **Runner:** unchanged and read-only on the inputs.
 - **Pilot policies:** the bucket and dataset policies (authoritative) are never edited for the loader.

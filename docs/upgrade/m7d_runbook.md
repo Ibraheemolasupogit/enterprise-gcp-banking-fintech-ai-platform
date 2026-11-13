@@ -1,6 +1,6 @@
 # M7D runbook: controlled synthetic ingestion into the GCP pilot
 
-Prepared offline in M7C2 (2026-11-13). **Nothing in this runbook has been executed.** M7D is a separately authorised GCP operation. The operator runs every step by hand in **Terminal.app**, never in Claude Code. The assistant only reviews outputs the operator chooses to share, and only after redaction.
+Prepared offline in M7C2 (2026-11-13). Updated the same day for the [M7D table IAM incident](m7d_incident_table_iam.md): the first `loader-access` apply partially failed because BigQuery rejected conditional table bindings. The three input-table grants are now **unconditional** and are ended only by revocation. Before any new window, run the incident re-entry gates R1–R5 (§5.6). **Apart from that partially failed window and its recovery, nothing in this runbook has been executed.** M7D is a separately authorised GCP operation. The operator runs every step by hand in **Terminal.app**, never in Claude Code. The assistant only reviews outputs the operator chooses to share, and only after redaction.
 
 Scope: load three synthetic input tables (`customers`, `accounts`, `curated_transactions`) from the pilot bucket into the existing, empty BigQuery tables, prove that they match the approved packet exactly, and revoke all loader access. **The four marts are out of scope** (M8).
 
@@ -9,6 +9,7 @@ Related documents:
 - [M7B packet](m7b_validation.md)
 - [M7C1 loader identity and gates L0–L7](m7c1_validation.md)
 - [M7C2 validation](m7c2_validation.md)
+- [M7D incident: conditional table IAM rejected](m7d_incident_table_iam.md)
 - [Gate C](../gcp_pilot_plan.md#gate-c-bounded-synthetic-workload)
 
 Conventions:
@@ -28,11 +29,11 @@ Conventions:
 | A2 | **Packet:** rebuilt from the A1 commit with `configs/synthetic_v2_m7_pilot.yaml` (4,000 transactions) | Manifest SHA-256 and packet ID | `verify-ingestion-packet --expected-manifest-sha256` |
 | A3 | **Loader identity:** bootstrap `loader-identity` saved plan | Plan SHA-256 | `--mode loader-identity` (`ok`, 4 creates, 11 unchanged) |
 | A4 | **Window:** start and expiry in UTC; recommended **3 h**, at most 8 h | `EXP` | Terraform validation; bundle refuses longer windows |
-| A5 | **Loader access:** bootstrap `loader-access` saved plan | Plan SHA-256 | `--mode loader-access --packet-id --bucket` (`ok`, 6 creates, 15 unchanged) |
+| A5 | **Loader access:** bootstrap `loader-access` saved plan | Plan SHA-256 | `--mode loader-access --packet-id --bucket` (`ok`, 6 creates, 15 unchanged). Three creates carry the exact expiry; the three table members carry **no** condition |
 | A6 | **Command bundle:** rendered for the A2 packet, the custody bucket and the A4 window | Bundle SHA-256 | `verify-bundle` step |
 | A7 | **Cost envelope:** see §2 | Values in §2 | Evidence ledger in `report.json` |
 | A8 | **Optional read probes:** the operator-identity prefix listing (`inventory`); the L5 out-of-prefix probe, or Policy Troubleshooter instead (separate API enablement) | Yes or no for each | Evidence present or absent |
-| A9 | **Revocation:** `loader-revoke` saved plan. Recommended as pre-approved with A5, since it only removes access | Plan SHA-256 | `--mode loader-revoke` (`ok`, 6 deletes) |
+| A9 | **Revocation:** `loader-revoke` saved plan. Recommended as pre-approved with A5, since it only removes access. **Mandatory:** the table grants do not expire on their own | Plan SHA-256 | `--mode loader-revoke` (`ok`, 6 deletes) |
 | A10 | **Post-load pilot check:** a pilot plan, **not applied** | Plan SHA-256 | `--mode pilot-loaded` (`ok`, 18 unchanged) |
 | A11 | **Closure:** the redacted evidence and the M7D closure document | Report SHA-256 | Review |
 
@@ -63,7 +64,10 @@ Rules:
    - a corrected packet means **a new packet ID**, and so new object names and job IDs.
 3. A failed load is atomic, so the table stays empty. Record it, revoke and review; nothing is deleted.
 4. A wrong but successful load cannot be undone by the loader, which has no delete rights. Stop, revoke, and plan recovery (truncate DML or time travel) as a **separately reviewed** operation (M7A G9).
-5. If the clock reaches `EXP` minus 15 minutes, the bundle refuses new steps. Revoke at once; the expiry is the hard stop.
+5. If the clock reaches `EXP` minus 15 minutes, the bundle refuses new steps. **Revoke at once.**
+   - `EXP` stops **new** loader tokens and new jobs.
+   - It does **not** end the three table grants. They persist until the `loader-revoke` apply removes them.
+   - A loader token issued before `EXP` stays usable on those tables (read and streaming insert) until the token's own expiry, up to 1 hour, or until revocation, whichever comes first (incident §5).
 6. Evidence files are never overwritten or edited. If one is unusable, record why, and capture a fresh one under a new name only after review.
 
 ## 4. Offline preparation (no cloud access)
@@ -90,6 +94,7 @@ Rules:
    - all seven tables report `numRows` `0`.
 4. **L1:** no principal other than the planned operator window grant will hold `getAccessToken`, Token Creator or `actAs` on the loader. Check the project policy for inherited Token Creator or Service Account User roles.
 5. **Budget (Console):** the £5 budget is present, and month-to-date spend is about £0.
+6. **Incident re-entry (R1–R5):** complete the [incident](m7d_incident_table_iam.md#6-re-entry-gates-before-a-new-loader-access-window) gates first. In particular, the `--mode loader-recovery` check on a base-tfvars plan must report `ok`, 0 creates, 0 deletes and 15 unchanged, and `state list` must hold none of the six grant addresses. The §6.1 loader identity already exists, so §6.1 is skipped; its read-back (no keys; exact role permissions; empty account policy) is repeated.
 
 ## 6. Window procedure
 
@@ -125,12 +130,12 @@ env -i HOME="$HOME" PATH="$PATH" python3 scripts/terraform_custody.py run --root
   | python3 scripts/bootstrap_plan_check.py --mode loader-access --packet-id=<packet_id> --bucket="$BUCKET"
 ```
 
-1. Expect `ok`, 6 creates, 15 unchanged and `bucket_approved: true`. Apply after A5. Then back up the bootstrap state and verify it.
+1. Expect `ok`, 6 creates, 15 unchanged and `bucket_approved: true`. The checker refuses any condition on a table grant and requires the exact expiry on the other three. Apply after A5. Then back up the bootstrap state and verify it.
 2. **Read back with policy version 3:**
-   - the project policy has exactly 2 conditional loader bindings;
-   - each input table has the loader binding **with its condition**;
+   - the project policy has exactly 2 conditional loader bindings (jobs; objects with the packet prefix), each with the A4 expiry;
+   - each of the three input tables has exactly one loader binding, `bankpilot_dev_loader_tables`, **with no condition**; no mart table has one;
    - the loader account policy has the operator with `bankpilot_dev_impersonate` and the same expiry.
-3. If a condition is missing or was rejected: **stop, revoke (§6.8) and review.** Never retry without the condition.
+3. If an expiring grant lacks its condition, a table binding carries one, or any apply step errors: **stop, revoke (§6.8) and review.** Never re-apply a partially failed saved plan, and never remove the condition from the jobs, objects or token-minting grants.
 4. Wait about 5 minutes for IAM propagation.
 
 ### 6.3 Render and approve the bundle (A6)
@@ -203,19 +208,53 @@ In Logs Explorer (Data Access), filter `protoPayload.methodName="GenerateAccessT
 - Expect the operator as caller and the loader as resource, matched by the §6.1 `uniqueId`.
 - This closes the M6T unmapped-identity limitation **for this window**.
 
-### 6.7 Optional table-condition enforcement (L6)
+### 6.7 Optional revocation enforcement (L6)
 
-Only if approved: mint a loader token shortly before `EXP` and call `tabledata.list` after `EXP`. Expect a denial.
+The M7C1 table-condition test no longer applies: the table grants have no condition, so a token minted before `EXP` keeps table access until revocation (incident R-A).
 
-### 6.8 Revocation (L7; A9) — straight after §6.4–6.6, and no later than `EXP`
+Only if approved, test instead that revocation cuts an existing token:
+1. Mint a loader token before the §6.8 revocation.
+2. Revoke, and wait about 5 minutes for propagation.
+3. Call `tabledata.list` on one input table with that token. Expect a denial.
 
-1. Plan with the **base file only** (which keeps `loader_identity_enabled = true`). Check with `--mode loader-revoke`: expect `ok` and 6 deletes. Apply.
+Keep the token in a shell variable only, and `unset` it afterwards.
+
+### 6.8 Revocation (L7; A9) — straight after §6.4–6.6; start no later than `EXP` − 15 minutes
+
+The table grants are unconditional, so this step, not `EXP`, ends the loader's table access.
+
+1. Plan with the **base file only** (which keeps `loader_identity_enabled = true`). Check with `--mode loader-revoke`: expect `ok` and 6 deletes, including the three unconditional table grants. Apply.
+   - If the revoke apply fails part-way, follow **§6.8.1**. Never leave a table grant in place.
 2. Back up the bootstrap state, upload and `verify-download`.
 3. `rm "$C/inputs/bootstrap-dev-loader.tfvars"`.
-4. **Read back:**
-   - no loader binding on the project, the three tables or the loader account;
+4. **Read back (mandatory; closure is blocked without it):**
+   - no loader binding on the project or the loader account;
+   - **each of the three input-table policies has no loader member.** The pilot root cannot see these members, so `pilot-loaded` cannot detect a leftover;
    - a loader token mint fails with `PERMISSION_DENIED`, and that attempt is logged.
 5. The loader identity stays, dormant and without grants.
+
+### 6.8.1 Emergency recovery after a part-way failed revocation
+
+Use this when a `loader-revoke` apply (or a `loader-access` apply) stops part-way, so some grants are gone and others may remain.
+
+1. **Stop.** Do not re-apply the failed saved plan, and do not retry with different settings.
+2. **Live IAM read-back (mandatory, operator identity, read-only, policy version 3).** Record for each of the six grants whether it is still live:
+   - the project policy: the loader jobs and objects bindings;
+   - the loader account policy: the operator's `bankpilot_dev_impersonate` binding;
+   - **each** of the three input-table policies: the loader `bankpilot_dev_loader_tables` binding.
+3. **Contain** (if the window may still be in use): no further bundle steps. A token issued before the failure stays usable on any remaining table grant until the token expires (up to 1 hour).
+4. **Re-plan with the base file only** and check it:
+   ```sh
+   … show -json "$P" | python3 scripts/bootstrap_plan_check.py --mode loader-revoke-partial
+   ```
+   - Expect `ok`, 0 creates and 15 unchanged. `delete_addresses` must equal **exactly** the grants that step 2 found still live **and** that state still records. `already_removed` and `absent_from_state` cover the rest.
+   - If all six are still in state, the checker refuses and names `--mode loader-revoke`: use the strict mode.
+   - **Stop and review** if the check fails, or if any planned delete is not live per step 2 (or a live grant is neither planned for deletion nor in state). A live grant that state does not record cannot be removed by Terraform. Removing it outside Terraform is an operator decision, recorded as in the [incident](m7d_incident_table_iam.md#2-emergency-recovery-completed-by-the-operator).
+5. Approve the plan SHA-256 and apply it. Back up and `verify-download`.
+6. **Live IAM read-back again (mandatory).** None of the six grants may remain. In particular, each of the three table policies has no loader member. A loader token mint fails with `PERMISSION_DENIED`.
+7. Confirm with `state list` that none of the six grant addresses remain. Record everything for closure (A11), which is blocked until step 6 passes.
+
+`loader-recovery` remains the narrower check for the original incident state, where the table grants were never created.
 
 ### 6.9 Live read-back after revocation (operator identity, read-only)
 
@@ -252,8 +291,9 @@ The M7D closure document records:
 - the `report.json` SHA-256 and its summary (per-table rows, rebuilt SHA-256, per-currency totals);
 - the job IDs and object generations;
 - the L1–L7 outcomes, including any findings;
+- the incident re-entry gates R1–R5 and the `loader-recovery` report;
 - the audit mapping;
 - the backup serials;
 - residual risks.
 
-**No cloud success is claimed unless `verify-all` reported `ok: true`, revocation is read back, and the `pilot-loaded` check passed.**
+**No cloud success is claimed unless `verify-all` reported `ok: true`, revocation is read back (including all three table policies), and the `pilot-loaded` check passed.**

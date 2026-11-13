@@ -80,5 +80,6 @@ Use this index to navigate the project documentation.
 - [M7B immutable synthetic ingestion packet](upgrade/m7b_validation.md)
 - [M7C1 dedicated loader identity and least-privilege IAM](upgrade/m7c1_validation.md)
 - [M7C2 operator bundle, evidence verifiers, read-back reconciliation and post-load plan check](upgrade/m7c2_validation.md)
-- [M7D runbook: controlled synthetic ingestion (not executed)](upgrade/m7d_runbook.md)
+- [M7D runbook: controlled synthetic ingestion](upgrade/m7d_runbook.md)
+- [M7D incident: conditional BigQuery table IAM rejected, recovery and correction](upgrade/m7d_incident_table_iam.md)
 - [M5 validation](upgrade/m5_validation.md)

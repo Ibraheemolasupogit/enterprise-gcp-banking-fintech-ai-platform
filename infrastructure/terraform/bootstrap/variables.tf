@@ -73,7 +73,7 @@ variable "loader_identity_enabled" {
 variable "loader_access_enabled" {
   type        = bool
   default     = false
-  description = "Grants the six expiring loader grants for one approved M7D window. Requires the loader identity; never together with provisioner access."
+  description = "Grants the six loader window grants for one approved M7D window (three expiring; three unconditional input-table members removed at revoke). Requires the loader identity; never together with provisioner access."
   validation {
     condition     = !var.loader_access_enabled || (var.loader_identity_enabled && !var.provisioner_access_enabled)
     error_message = "Loader access requires loader_identity_enabled and must not overlap provisioner access."
@@ -83,7 +83,7 @@ variable "loader_access_enabled" {
 variable "loader_access_expiry" {
   type        = string
   default     = null
-  description = "UTC RFC 3339 expiry of the loader grants, after plan time and at most 8 hours later. Null while loader access is disabled."
+  description = "UTC RFC 3339 expiry of the three conditional loader grants (jobs, objects, token minting), after plan time and at most 8 hours later. Null while loader access is disabled."
   validation {
     condition = (
       var.loader_access_expiry == null ? !var.loader_access_enabled : (

@@ -103,8 +103,8 @@ def grants(actions, expiry=EXPIRY, bucket=BUCKET, prefix=PREFIX, operator=OPERAT
         out.append(_rc(f'google_bigquery_table_iam_member.loader["{table}"]',
                        "google_bigquery_table_iam_member", "loader",
                        {"project": P, "dataset_id": "bankpilot_dev", "table_id": table,
-                        "role": f"{R}loader_tables", "member": LOADER, "condition": cond},
-                       actions, index=table))
+                        "role": f"{R}loader_tables", "member": LOADER, "condition": [],
+                        **ids}, actions, index=table))
     return out
 
 
@@ -312,14 +312,21 @@ ACCESS_BAD = {
     # expiry and conditions
     "jobs grant without condition": lambda p: after(p, bpc.LOADER_JOBS_GRANT).update(
         condition=[]),
-    "table grant without condition": lambda p: after(p, TABLE).update(condition=None),
+    # M7D correction: a table grant must carry no condition at all.
+    "table grant with the approved expiry": lambda p: after(p, TABLE).update(
+        condition=[bpc.loader_expiry_condition(EXPIRY)]),
+    "table grant with an object condition": lambda p: after(p, TABLE).update(
+        condition=[bpc.loader_object_condition(EXPIRY, BUCKET, PREFIX)]),
+    "table grant with an empty condition object": lambda p: after(p, TABLE).update(
+        condition=[{}]),
+    "table grant condition key missing": lambda p: after(p, TABLE).pop("condition"),
     "impersonation without condition": lambda p: after(p, bpc.LOADER_IMPERSONATION).update(
         condition=[]),
     "two conditions": lambda p: after(p, bpc.LOADER_JOBS_GRANT)["condition"].append(
         bpc.loader_expiry_condition(EXPIRY)),
     "condition widened with or-true": lambda p: _cond(p, bpc.LOADER_JOBS_GRANT).update(
         expression=_cond(p, bpc.LOADER_JOBS_GRANT)["expression"] + " || true"),
-    "later expiry on one grant": lambda p: after(p, TABLE).update(
+    "later expiry on one grant": lambda p: after(p, bpc.LOADER_IMPERSONATION).update(
         condition=[bpc.loader_expiry_condition("2026-11-20T16:00:00Z")]),
     "M6 provisioner condition reused": lambda p: after(p, bpc.LOADER_JOBS_GRANT).update(
         condition=[bpc.expiry_condition(EXPIRY)]),
@@ -398,7 +405,7 @@ def _set_expiry(p, expiry):
     p["variables"]["loader_access_expiry"]["value"] = expiry
     if expiry is not None:
         for rc in p["resource_changes"]:
-            if rc["address"] in bpc.LOADER_GRANTS:
+            if rc["address"] in bpc.LOADER_EXPIRING_GRANTS:
                 rc["change"]["after"]["condition"] = [
                     bpc.loader_object_condition(expiry, BUCKET, PREFIX)
                     if rc["address"] == bpc.LOADER_OBJECTS_GRANT
@@ -488,7 +495,14 @@ REVOKE_BAD = {
         ["create"], index=1)),
     "deleted grant is a different role": lambda p: before(p, bpc.LOADER_JOBS_GRANT).update(
         role=f"{R}provision"),
-    "deleted grant had no condition": lambda p: before(p, TABLE).update(condition=[]),
+    "deleted grant had no condition": lambda p: before(p, bpc.LOADER_JOBS_GRANT).update(
+        condition=[]),
+    "deleted impersonation had no condition": lambda p: before(
+        p, bpc.LOADER_IMPERSONATION).update(condition=[]),
+    "deleted table grant had a condition": lambda p: before(p, TABLE).update(
+        condition=[bpc.loader_expiry_condition(EXPIRY)]),
+    "deleted table grant on a mart": lambda p: before(p, TABLE).update(
+        table_id="transaction_daily"),
     "drift removed a condition": lambda p: p.update(resource_drift=[_loader_drift(
         condition=[])]),
     "drift widened the role": lambda p: p.update(resource_drift=[_loader_drift(
@@ -661,3 +675,448 @@ def test_fixture_independence():
     ACCESS_BAD["jobs to runner"](first)
     assert check(second, "loader-access")["ok"]
     assert copy.deepcopy(second) == plan("loader-access")
+
+
+# ---------------------------------------------------------------- M7D table IAM correction
+
+def _tf_block(text, kind, name):
+    match = re.search(rf'resource "{kind}" "{name}" \{{\n(.*?)\n\}}\n', text, re.S)
+    assert match, (kind, name)
+    return match.group(1)
+
+
+def test_terraform_table_grants_are_unconditional_and_the_rest_still_expire():
+    text = (BOOTSTRAP / "main.tf").read_text()
+    table = _tf_block(text, "google_bigquery_table_iam_member", "loader")
+    assert "condition" not in table and "dynamic" not in table
+    assert "for_each   = local.loader_tables" in table
+    assert 'role       = google_project_iam_custom_role.loader["loader_tables"].name' in table
+    assert "member     = google_service_account.loader[0].member" in table
+    assert "dataset_id = local.loader_dataset_id" in table
+    for kind, name, cond in (
+            ("google_project_iam_member", "loader_jobs", "loader_expiry_condition"),
+            ("google_project_iam_member", "loader_objects", "loader_object_condition"),
+            ("google_service_account_iam_member", "operator_loader_impersonation",
+             "loader_expiry_condition")):
+        body = _tf_block(text, kind, name)
+        assert body.count("condition {") == 1, name
+        for key in ("title", "description", "expression"):
+            assert f"local.{cond}.{key}" in body, (name, key)
+        assert "count" in body and "local.loader_access_count" in body
+    # Still exactly three input tables, only while access is enabled; never the dataset.
+    assert ('loader_tables         = var.loader_access_enabled ? toset(["accounts", '
+            '"curated_transactions", "customers"]) : toset([])') in text
+    assert "google_bigquery_dataset_iam" not in text
+
+
+def test_loader_roles_json_is_unchanged_by_the_correction():
+    """The preserved custom roles must not drift: a description edit would plan an update."""
+    roles = bpc.loader_roles()
+    assert roles["loader_tables"]["permissions"] == [
+        "bigquery.tables.get", "bigquery.tables.getData", "bigquery.tables.updateData"]
+    assert roles["loader_tables"]["description"].startswith("M7C1: load into and read back")
+
+
+def test_access_plan_table_grants_carry_no_condition_and_others_exact_expiry():
+    p = plan("loader-access")
+    for addr in bpc.LOADER_TABLE_GRANTS:
+        assert after(p, addr)["condition"] == []
+    report = check(p, "loader-access")
+    assert report["ok"], report["problems"]
+    for addr in bpc.LOADER_EXPIRING_GRANTS:
+        assert len(after(p, addr)["condition"]) == 1
+
+
+@pytest.mark.parametrize("table", bpc.LOADER_TABLES)
+def test_any_table_condition_is_reported_per_table(table):
+    p = plan("loader-access")
+    addr = f'google_bigquery_table_iam_member.loader["{table}"]'
+    after(p, addr)["condition"] = [bpc.loader_expiry_condition(EXPIRY)]
+    assert f"{addr}: table grant must be unconditional (no condition block)" in \
+        check(p, "loader-access")["problems"]
+
+
+def test_unconditional_is_only_accepted_on_table_grants():
+    for addr in bpc.LOADER_EXPIRING_GRANTS:
+        p = plan("loader-access")
+        after(p, addr)["condition"] = []
+        assert not check(p, "loader-access")["ok"], addr
+
+
+# ---------------------------------------------------------------- loader-recovery (M7D)
+
+def recovery_plan(deleted=(), removed=(), drift=()) -> dict:
+    """Base tfvars plan after the partial loader-access apply: tables never created."""
+    p = plan("loader-revoke")
+    expiring = {rc["address"]: rc for rc in p["resource_changes"]
+                if rc["address"] in bpc.LOADER_EXPIRING_GRANTS}
+    p["resource_changes"] = [rc for rc in p["resource_changes"]
+                             if rc["address"] not in bpc.LOADER_GRANTS]
+    p["resource_changes"] += [expiring[a] for a in deleted]
+    p["resource_drift"] = ([_rc(a, "x", "y", {}, ["delete"]) for a in removed]
+                           + [_loader_drift(a) for a in drift])
+    return p
+
+
+EXPIRING = sorted(bpc.LOADER_EXPIRING_GRANTS)
+
+
+@pytest.mark.parametrize("deleted,removed", [
+    ((), ()),                                   # state already clean
+    (EXPIRING, ()),                             # state still records all three; live present
+    ((), EXPIRING),                             # revoked outside Terraform; state stale
+    ([bpc.LOADER_IMPERSONATION], [bpc.LOADER_JOBS_GRANT, bpc.LOADER_OBJECTS_GRANT]),
+    ([bpc.LOADER_JOBS_GRANT], ()),
+])
+def test_recovery_accepts_every_honest_partial_state(deleted, removed):
+    report = check(recovery_plan(deleted, removed), "loader-recovery")
+    assert report["ok"], report["problems"]
+    assert (report["creates"], report["unchanged"]) == (0, 15)
+    assert report["delete_addresses"] == sorted(deleted)
+    assert report["already_removed"] == sorted(removed)
+    assert report["absent_from_state"] == sorted(
+        bpc.LOADER_EXPIRING_GRANTS - set(deleted) - set(removed))
+
+
+def test_recovery_accepts_strict_etag_drift_on_loader_project_grants():
+    p = recovery_plan([bpc.LOADER_JOBS_GRANT, bpc.LOADER_OBJECTS_GRANT],
+                      drift=[bpc.LOADER_JOBS_GRANT])
+    p["resource_drift"].append(_runner_drift())
+    report = check(p, "loader-recovery")
+    assert report["ok"], report["problems"]
+    assert report["accepted_etag_drift"] == sorted([bpc.LOADER_JOBS_GRANT, bpc.RUNNER_GRANT])
+
+
+def _table_rc(actions, **values):
+    base = {"project": P, "dataset_id": "bankpilot_dev", "table_id": "customers",
+            "role": f"{R}loader_tables", "member": LOADER, "condition": [], "id": "x",
+            "etag": "BwX1"}
+    return _rc(TABLE, "google_bigquery_table_iam_member", "loader", {**base, **values},
+               actions, index="customers")
+
+
+RECOVERY_BAD = {
+    "table grant deleted": lambda p: p["resource_changes"].append(_table_rc(["delete"])),
+    "table grant created": lambda p: p["resource_changes"].append(_table_rc(["create"])),
+    "table grant in state unchanged": lambda p: p["resource_changes"].append(
+        _table_rc(["no-op"])),
+    "table grant already removed": lambda p: p["resource_drift"].append(
+        _rc(TABLE, "x", "y", {}, ["delete"])),
+    "conditional table grant deleted": lambda p: p["resource_changes"].append(
+        _table_rc(["delete"], condition=[bpc.loader_expiry_condition(EXPIRY)])),
+    "expiring grant created": lambda p: p["resource_changes"].append(
+        grants(["create"])[0]),
+    "expiring grant left unchanged": lambda p: p["resource_changes"].append(
+        grants(["no-op"], with_ids=True)[0]),
+    "removed and also deleted": lambda p: (
+        p["resource_changes"].append(grants(["delete"], with_ids=True)[0]),
+        p["resource_drift"].append(_rc(bpc.LOADER_JOBS_GRANT, "x", "y", {}, ["delete"]))),
+    "duplicate removal": lambda p: p["resource_drift"].extend(
+        [_rc(bpc.LOADER_JOBS_GRANT, "x", "y", {}, ["delete"])] * 2),
+    "deleted grant without condition": lambda p: p["resource_changes"].append(_rc(
+        bpc.LOADER_JOBS_GRANT, "google_project_iam_member", "loader_jobs",
+        {"project": P, "role": f"{R}loader_jobs", "member": LOADER, "condition": [],
+         "id": "x"}, ["delete"], index=0)),
+    "deleted grant is a broader role": lambda p: p["resource_changes"].append(_rc(
+        bpc.LOADER_JOBS_GRANT, "google_project_iam_member", "loader_jobs",
+        {"project": P, "role": "roles/bigquery.admin", "member": LOADER,
+         "condition": [bpc.loader_expiry_condition(EXPIRY)], "id": "x"}, ["delete"], index=0)),
+    "provisioner grant deleted": lambda p: p["resource_changes"].append(_rc(
+        bpc.PROVISIONER_GRANT, "google_project_iam_member", "provisioner",
+        {"project": P, "role": f"{R}provision", "member": PROVISIONER,
+         "condition": [bpc.expiry_condition(EXPIRY)]}, ["delete"], index=0)),
+    "provisioner grant already removed": lambda p: p["resource_drift"].append(
+        _rc(bpc.PROVISIONER_GRANT, "x", "y", {}, ["delete"])),
+    "runner grant deleted": lambda p: by(p, bpc.RUNNER_GRANT)["change"].update(
+        actions=["delete"], after=None),
+    "identity destroyed": lambda p: by(p, bpc.LOADER_ACCOUNT)["change"].update(
+        actions=["delete"], after=None),
+    "loader role updated": lambda p: by(
+        p, 'google_project_iam_custom_role.loader["loader_tables"]')["change"].update(
+        actions=["update"]),
+    "access still enabled": lambda p: p["variables"]["loader_access_enabled"].update(value=True),
+    "expiry left set": lambda p: p["variables"]["loader_access_expiry"].update(value=EXPIRY),
+    "bucket left set": lambda p: p["variables"]["loader_bucket_name"].update(value=BUCKET),
+    "prefix left set": lambda p: p["variables"]["loader_object_prefix"].update(value=PREFIX),
+    "identity disabled": lambda p: p["variables"]["loader_identity_enabled"].update(
+        value=False),
+    "provisioner access on": lambda p: p["variables"]["provisioner_access_enabled"].update(
+        value=True),
+    "drift widened a loader grant": lambda p: p["resource_drift"].append(_loader_drift(
+        role="roles/bigquery.admin")),
+    "drift on impersonation": lambda p: p["resource_drift"].append({
+        **_loader_drift(), "address": bpc.LOADER_IMPERSONATION,
+        "type": "google_service_account_iam_member", "name": "operator_loader_impersonation"}),
+    "drift on loader identity": lambda p: p["resource_drift"].append({
+        **by(p, bpc.LOADER_ACCOUNT), "change": {"actions": ["update"], "before": {},
+                                                 "after": {}}}),
+    "plan errored": lambda p: p.update(errored=True),
+    "loader key": lambda p: p["resource_changes"].append(_rc(
+        "google_service_account_key.loader[0]", "google_service_account_key", "loader", {},
+        ["create"], index=0)),
+}
+
+
+@pytest.mark.parametrize("name", RECOVERY_BAD)
+def test_adversarial_recovery_plans_are_rejected(name):
+    p = recovery_plan([bpc.LOADER_IMPERSONATION], [bpc.LOADER_OBJECTS_GRANT])
+    RECOVERY_BAD[name](p)
+    assert not check(p, "loader-recovery")["ok"], name
+
+
+def test_recovery_is_not_a_substitute_for_revoke():
+    """A full window revocation (table grants in state) must use loader-revoke."""
+    assert not check(plan("loader-revoke"), "loader-recovery")["ok"]
+    problems = check(plan("loader-revoke"), "loader-recovery")["problems"]
+    assert sum(a in x for x in problems for a in bpc.LOADER_TABLE_GRANTS) >= 3
+
+
+def test_partial_state_fails_revoke_and_passes_only_the_partial_modes():
+    p = recovery_plan(EXPIRING)
+    for mode in bpc.BOOTSTRAP_MODES:
+        assert check(p, mode)["ok"] is (mode in bpc.PARTIAL_GRANTS), mode
+    problems = check(p, "loader-revoke")["problems"]
+    assert sum("expected delete missing" in x for x in problems) == 3
+
+
+def test_recovery_drift_table_matches_revoke_exactly():
+    assert bpc.LOADER_ETAG_DRIFT_BY_MODE["loader-recovery"] == \
+        bpc.LOADER_ETAG_DRIFT_BY_MODE["loader-revoke"]
+    assert bpc.LOADER_EXPIRING_GRANTS == bpc.LOADER_GRANTS - bpc.LOADER_TABLE_GRANTS
+
+
+def test_cli_recovery_mode():
+    ok = _cli(recovery_plan([bpc.LOADER_JOBS_GRANT], [bpc.LOADER_IMPERSONATION]),
+              "--mode", "loader-recovery")
+    assert ok.returncode == 0, ok.stdout
+    report = json.loads(ok.stdout)
+    assert report["absent_from_state"] == [bpc.LOADER_OBJECTS_GRANT]
+    assert "named-operator" not in ok.stdout
+    bad = recovery_plan()
+    bad["resource_changes"].append(_table_rc(["delete"]))
+    assert _cli(bad, "--mode", "loader-recovery").returncode == 1
+
+
+# ---------------------------------------------------------------- loader-revoke-partial (M7D)
+
+ALL = sorted(bpc.LOADER_GRANTS)
+TABLES = sorted(bpc.LOADER_TABLE_GRANTS)
+
+
+def partial_plan(deleted=(), removed=(), drift=()) -> dict:
+    """Base tfvars re-plan after a revoke (or access) apply that failed part-way."""
+    p = plan("loader-revoke")
+    full = {rc["address"]: rc for rc in p["resource_changes"]
+            if rc["address"] in bpc.LOADER_GRANTS}
+    p["resource_changes"] = [rc for rc in p["resource_changes"]
+                             if rc["address"] not in bpc.LOADER_GRANTS]
+    p["resource_changes"] += [full[a] for a in deleted]
+    p["resource_drift"] = ([_rc(a, "x", "y", {}, ["delete"]) for a in removed]
+                           + [_loader_drift(a) for a in drift])
+    return p
+
+
+@pytest.mark.parametrize("deleted,removed", [
+    (TABLES, ()),                                       # revoke removed the expiring three
+    ([TABLES[0]], ()),                                  # one table grant left
+    (EXPIRING, ()),                                     # tables removed first
+    ([bpc.LOADER_IMPERSONATION, TABLES[1]], [bpc.LOADER_JOBS_GRANT]),
+    ((), [TABLES[2]]),                                  # last grant removed by hand
+    (ALL[:5], ()),                                      # five of six still recorded
+    ((), ()),                                           # everything already gone from state
+])
+def test_partial_revoke_accepts_every_honest_subset(deleted, removed):
+    report = check(partial_plan(deleted, removed), "loader-revoke-partial")
+    assert report["ok"], report["problems"]
+    assert (report["creates"], report["unchanged"]) == (0, 15)
+    assert report["delete_addresses"] == sorted(deleted)
+    assert report["already_removed"] == sorted(removed)
+    assert report["absent_from_state"] == sorted(
+        bpc.LOADER_GRANTS - set(deleted) - set(removed))
+    assert report["live_iam_readback_required"] is True
+
+
+def test_every_single_grant_subset_passes_and_deletes_exactly_that_grant():
+    for addr in ALL:
+        report = check(partial_plan([addr]), "loader-revoke-partial")
+        assert report["ok"], (addr, report["problems"])
+        assert report["delete_addresses"] == [addr]
+
+
+@pytest.mark.parametrize("removed", [(), [bpc.LOADER_JOBS_GRANT], TABLES])
+def test_partial_revoke_refuses_a_complete_revocation(removed):
+    """All six in state (deleted or drift-removed) must go through strict loader-revoke."""
+    deleted = [a for a in ALL if a not in removed]
+    report = check(partial_plan(deleted, removed), "loader-revoke-partial")
+    assert not report["ok"]
+    assert any("use --mode loader-revoke" in x for x in report["problems"])
+    assert check(partial_plan(deleted, removed), "loader-revoke")["ok"]
+
+
+def test_partial_revoke_accepts_strict_etag_drift_on_loader_project_grants():
+    p = partial_plan([bpc.LOADER_JOBS_GRANT, *TABLES], drift=[bpc.LOADER_JOBS_GRANT])
+    p["resource_drift"].append(_runner_drift())
+    report = check(p, "loader-revoke-partial")
+    assert report["ok"], report["problems"]
+    assert report["accepted_etag_drift"] == sorted([bpc.LOADER_JOBS_GRANT, bpc.RUNNER_GRANT])
+
+
+def _grant(addr, actions, **values):
+    rc = copy.deepcopy(next(g for g in grants(["delete"], with_ids=True)
+                            if g["address"] == addr))
+    side = {**rc["change"]["before"], **values}
+    return _rc(addr, rc["type"], rc["name"], side, actions, index=rc.get("index"))
+
+
+PARTIAL_BAD = {
+    # unexpected creates
+    "table grant recreated": lambda p: p["resource_changes"].append(
+        _grant(TABLES[2], ["create"])),
+    "jobs grant recreated": lambda p: p["resource_changes"].append(
+        _grant(bpc.LOADER_JOBS_GRANT, ["create"])),
+    "fourth table grant created": lambda p: p["resource_changes"].append(_rc(
+        'google_bigquery_table_iam_member.loader["transaction_daily"]',
+        "google_bigquery_table_iam_member", "loader",
+        {"project": P, "dataset_id": "bankpilot_dev", "table_id": "transaction_daily",
+         "role": f"{R}loader_tables", "member": LOADER, "condition": []}, ["create"],
+        index="transaction_daily")),
+    "loader key created": lambda p: p["resource_changes"].append(_rc(
+        "google_service_account_key.loader[0]", "google_service_account_key", "loader", {},
+        ["create"], index=0)),
+    # unexpected updates / replacements / left-in-place
+    "table grant updated": lambda p: p["resource_changes"].append(
+        _grant(TABLES[2], ["update"])),
+    "impersonation replaced": lambda p: p["resource_changes"].append(
+        _grant(bpc.LOADER_IMPERSONATION, ["delete", "create"])),
+    "table grant left unchanged": lambda p: p["resource_changes"].append(
+        _grant(TABLES[2], ["no-op"])),
+    "loader role updated": lambda p: by(
+        p, 'google_project_iam_custom_role.loader["loader_tables"]')["change"].update(
+        actions=["update"]),
+    # unexpected deletions
+    "mart table grant deleted": lambda p: p["resource_changes"].append(_rc(
+        'google_bigquery_table_iam_member.loader["transaction_daily"]',
+        "google_bigquery_table_iam_member", "loader",
+        {"project": P, "dataset_id": "bankpilot_dev", "table_id": "transaction_daily",
+         "role": f"{R}loader_tables", "member": LOADER, "condition": [], "id": "x"},
+        ["delete"], index="transaction_daily")),
+    "runner grant deleted": lambda p: by(p, bpc.RUNNER_GRANT)["change"].update(
+        actions=["delete"], after=None),
+    "provisioner grant deleted": lambda p: p["resource_changes"].append(_rc(
+        bpc.PROVISIONER_GRANT, "google_project_iam_member", "provisioner",
+        {"project": P, "role": f"{R}provision", "member": PROVISIONER,
+         "condition": [bpc.expiry_condition(EXPIRY)]}, ["delete"], index=0)),
+    "M6 impersonation deleted": lambda p: p["resource_changes"].append(_rc(
+        bpc.IMPERSONATION_GRANT, "google_service_account_iam_member", "operator_impersonation",
+        {"service_account_id": f"projects/{P}/serviceAccounts/{bpc.PROVISIONER_EMAIL}",
+         "role": f"{R}impersonate", "member": OPERATOR,
+         "condition": [bpc.expiry_condition(EXPIRY)]}, ["delete"], index=0)),
+    "loader account destroyed": lambda p: by(p, bpc.LOADER_ACCOUNT)["change"].update(
+        actions=["delete"], after=None),
+    "loader role destroyed": lambda p: by(
+        p, 'google_project_iam_custom_role.loader["loader_jobs"]')["change"].update(
+        actions=["delete"], after=None),
+    "audit config deleted": lambda p: by(p, bpc.AUDIT_ADDRESS)["change"].update(
+        actions=["delete"], after=None),
+    "provisioner already removed": lambda p: p["resource_drift"].append(
+        _rc(bpc.PROVISIONER_GRANT, "x", "y", {}, ["delete"])),
+    "mart grant already removed": lambda p: p["resource_drift"].append(_rc(
+        'google_bigquery_table_iam_member.loader["transaction_daily"]', "x", "y", {},
+        ["delete"])),
+    # deleted grant is not the exact approved grant
+    "deleted table grant had a condition": lambda p: p["resource_changes"].append(
+        _grant(TABLES[2], ["delete"], condition=[bpc.loader_expiry_condition(EXPIRY)])),
+    "deleted table grant wrong role": lambda p: p["resource_changes"].append(
+        _grant(TABLES[2], ["delete"], role="roles/bigquery.dataEditor")),
+    "deleted table grant wrong member": lambda p: p["resource_changes"].append(
+        _grant(TABLES[2], ["delete"], member=RUNNER)),
+    "deleted table grant other dataset": lambda p: p["resource_changes"].append(
+        _grant(TABLES[2], ["delete"], dataset_id="other_dataset")),
+    "deleted table key and id disagree": lambda p: p["resource_changes"].append(
+        _grant(TABLES[2], ["delete"], table_id="accounts")),
+    "deleted objects grant had no condition": lambda p: p["resource_changes"].append(
+        _grant(bpc.LOADER_OBJECTS_GRANT, ["delete"], condition=[])),
+    "deleted objects grant jobs-style title": lambda p: p["resource_changes"].append(
+        _grant(bpc.LOADER_OBJECTS_GRANT, ["delete"],
+               condition=[bpc.loader_expiry_condition(EXPIRY)])),
+    "deleted impersonation for another user": lambda p: p["resource_changes"].append(
+        _grant(bpc.LOADER_IMPERSONATION, ["delete"], member="group:ops@example.invalid")),
+    "deleted impersonation on provisioner": lambda p: p["resource_changes"].append(
+        _grant(bpc.LOADER_IMPERSONATION, ["delete"], service_account_id=(
+            f"projects/{P}/serviceAccounts/{bpc.PROVISIONER_EMAIL}"))),
+    "deleted grant other project": lambda p: p["resource_changes"].append(
+        _grant(bpc.LOADER_OBJECTS_GRANT, ["delete"], project="other-project")),
+    # double accounting / drift
+    "removed and also deleted": lambda p: (
+        p["resource_changes"].append(_grant(TABLES[2], ["delete"])),
+        p["resource_drift"].append(_rc(TABLES[2], "x", "y", {}, ["delete"]))),
+    "duplicate removal": lambda p: p["resource_drift"].extend(
+        [_rc(TABLES[2], "x", "y", {}, ["delete"])] * 2),
+    "removal reported as update": lambda p: p["resource_drift"].append(
+        _rc(TABLES[2], "x", "y", {}, ["update"])),
+    "drift widened a loader grant": lambda p: (
+        p["resource_changes"].append(_grant(bpc.LOADER_OBJECTS_GRANT, ["delete"])),
+        p["resource_drift"].append(_loader_drift(bpc.LOADER_OBJECTS_GRANT,
+                                                 role="roles/bigquery.admin"))),
+    "etag drift on a grant not deleted": lambda p: p["resource_drift"].append(
+        _loader_drift(bpc.LOADER_OBJECTS_GRANT)),
+    "etag drift on a table grant": lambda p: p["resource_drift"].append({
+        **_grant(TABLES[0], ["update"]), "change": {
+            "actions": ["update"], "before": _grant(TABLES[0], ["no-op"])["change"]["before"],
+            "after": {**_grant(TABLES[0], ["no-op"])["change"]["before"], "etag": "z"}}}),
+    "drift on loader identity": lambda p: p["resource_drift"].append({
+        **by(p, bpc.LOADER_ACCOUNT), "change": {"actions": ["update"], "before": {},
+                                                 "after": {}}}),
+    # variables and plan state
+    "access still enabled": lambda p: p["variables"]["loader_access_enabled"].update(value=True),
+    "expiry left set": lambda p: p["variables"]["loader_access_expiry"].update(value=EXPIRY),
+    "bucket left set": lambda p: p["variables"]["loader_bucket_name"].update(value=BUCKET),
+    "prefix left set": lambda p: p["variables"]["loader_object_prefix"].update(value=PREFIX),
+    "identity disabled": lambda p: p["variables"]["loader_identity_enabled"].update(
+        value=False),
+    "provisioner access on": lambda p: p["variables"]["provisioner_access_enabled"].update(
+        value=True),
+    "plan errored": lambda p: p.update(errored=True),
+    "binding text": lambda p: p.update(configuration={"x": "google_project_iam_binding"}),
+}
+
+
+@pytest.mark.parametrize("name", PARTIAL_BAD)
+def test_adversarial_partial_revoke_plans_are_rejected(name):
+    # Base: two table grants and the impersonation still recorded; jobs removed by hand.
+    p = partial_plan([TABLES[0], TABLES[1], bpc.LOADER_IMPERSONATION],
+                     [bpc.LOADER_JOBS_GRANT])
+    assert check(p, "loader-revoke-partial")["ok"]
+    PARTIAL_BAD[name](p)
+    assert not check(p, "loader-revoke-partial")["ok"], name
+
+
+def test_normal_revoke_stays_strict_for_partial_states():
+    for deleted, removed in ((TABLES, ()), (EXPIRING, ()), ((), [TABLES[0]])):
+        problems = check(partial_plan(deleted, removed), "loader-revoke")["problems"]
+        missing = bpc.LOADER_GRANTS - set(deleted) - set(removed)
+        assert sum("expected delete missing" in x for x in problems) == len(missing)
+
+
+def test_partial_modes_share_the_revoke_drift_table():
+    assert bpc.LOADER_ETAG_DRIFT_BY_MODE["loader-revoke-partial"] == \
+        bpc.LOADER_ETAG_DRIFT_BY_MODE["loader-revoke"]
+    assert bpc.PARTIAL_GRANTS == {"loader-recovery": bpc.LOADER_EXPIRING_GRANTS,
+                                  "loader-revoke-partial": bpc.LOADER_GRANTS}
+
+
+@pytest.mark.parametrize("source", ["loader-identity", "loader-access"])
+def test_partial_revoke_rejects_window_plans(source):
+    assert not check(plan(source), "loader-revoke-partial")["ok"]
+
+
+def test_cli_partial_revoke():
+    ok = _cli(partial_plan([TABLES[0]], [bpc.LOADER_IMPERSONATION]),
+              "--mode", "loader-revoke-partial")
+    assert ok.returncode == 0, ok.stdout
+    report = json.loads(ok.stdout)
+    assert report["delete_addresses"] == [TABLES[0]]
+    assert report["live_iam_readback_required"] is True
+    assert "named-operator" not in ok.stdout
+    full = _cli(plan("loader-revoke"), "--mode", "loader-revoke-partial")
+    assert full.returncode == 1

@@ -42,7 +42,11 @@ locals {
 
 # M7C1 dedicated loader (keyless). Two independent switches, both off by default:
 #   loader_identity_enabled  durable account + three custom roles; grants nothing by itself.
-#   loader_access_enabled    six expiring grants for one M7D window; revoke by setting false.
+#   loader_access_enabled    six window grants for one M7D window; revoke by setting false.
+#     Three expire by IAM condition (jobs, objects, token minting). The three input-table
+#     members are unconditional (M7D incident: BigQuery rejected conditional table bindings).
+#     They do NOT expire: they persist until the loader-revoke apply removes them, and a loader
+#     token issued before the expiry keeps table access until that token itself expires.
 locals {
   loader_roles          = jsondecode(file("${path.module}/../../iam/loader_roles.json"))
   loader_identity_count = var.loader_identity_enabled ? 1 : 0
@@ -199,7 +203,7 @@ resource "google_project_iam_custom_role" "loader" {
   }
 }
 
-# ---- M7C1 loader access window: six additive, expiring grants; never permanent ----
+# ---- M7C1 loader access window: six additive grants, all removed at revoke ----
 
 # Project is the only scope bigquery.jobs.create has; only the expiry can narrow it.
 resource "google_project_iam_member" "loader_jobs" {
@@ -230,6 +234,12 @@ resource "google_project_iam_member" "loader_objects" {
 
 # Additive members on exactly the three existing input tables; the pilot root's runner members
 # on the same tables are separate and unaffected. Never the dataset (authoritative policy).
+# M7D correction: deliberately UNCONDITIONAL. BigQuery rejected IAM conditions on these table
+# bindings at apply (M7D incident). These members persist until the loader-revoke apply
+# removes them; the expiry of token minting stops NEW tokens only, and a token issued before
+# it remains usable on these tables until the token's own expiry (up to 1 h). Scoped by
+# attachment to these three tables. The plan checker rejects any condition here and requires
+# all three to be deleted at revoke (loader-revoke, or loader-revoke-partial after a failure).
 resource "google_bigquery_table_iam_member" "loader" {
   for_each   = local.loader_tables
   project    = var.project_id
@@ -237,11 +247,6 @@ resource "google_bigquery_table_iam_member" "loader" {
   table_id   = each.key
   role       = google_project_iam_custom_role.loader["loader_tables"].name
   member     = google_service_account.loader[0].member
-  condition {
-    title       = local.loader_expiry_condition.title
-    description = local.loader_expiry_condition.description
-    expression  = local.loader_expiry_condition.expression
-  }
 }
 
 # Token minting on the loader account resource only, for the same single named operator.

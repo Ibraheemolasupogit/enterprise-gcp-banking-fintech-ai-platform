@@ -208,6 +208,8 @@ The `test_loader_plan_check.py` cases:
 
 ## Unresolved provider and API questions
 
+> **M7D update (2026-11-13):** Q1 and Q2 were answered at apply. The provider accepted the table `condition` block, but **BigQuery rejected conditional table bindings**, and the `loader-access` apply partially failed. The table grants are now unconditional, ended by revocation. Gates L3 and L6 below are superseded by the [incident correction](m7d_incident_table_iam.md) and the updated [M7D runbook](m7d_runbook.md). Residual risk 2 is replaced by incident risks R-A to R-D.
+
 | # | Question | Effect if wrong | Resolved by |
 | --- | --- | --- | --- |
 | Q1 | Does `google_bigquery_table_iam_member` (google 7.31.0) accept a `condition` block? | `validate` or plan fails: fails closed, nothing granted | L0 |
