@@ -1,6 +1,6 @@
 # M7D runbook: controlled synthetic ingestion into the GCP pilot
 
-Prepared offline in M7C2 (2026-11-13). Updated the same day for the [M7D table IAM incident](m7d_incident_table_iam.md): the first `loader-access` apply partially failed because BigQuery rejected conditional table bindings. The three input-table grants are now **unconditional** and are ended only by revocation. Before any new window, run the incident re-entry gates R1–R5 (§5.6). **Apart from that partially failed window and its recovery, nothing in this runbook has been executed.** M7D is a separately authorised GCP operation. The operator runs every step by hand in **Terminal.app**, never in Claude Code. The assistant only reviews outputs the operator chooses to share, and only after redaction.
+Prepared offline in M7C2 (2026-11-13). Updated the same day for the [M7D table IAM incident](m7d_incident_table_iam.md): the first `loader-access` apply partially failed because BigQuery rejected conditional table bindings. The three input-table grants are now **unconditional** and are ended only by revocation. Before any new window, run the incident re-entry gates R1–R5 (§5.6). **Executed by the operator on 2026-11-17; see the [M7D closure](m7d_closure.md).** Updated after that run (§6.10): A10 needs an approved provisioner access window, which M7D does not open. M7D is a separately authorised GCP operation. The operator runs every step by hand in **Terminal.app**, never in Claude Code. The assistant only reviews outputs the operator chooses to share, and only after redaction.
 
 Scope: load three synthetic input tables (`customers`, `accounts`, `curated_transactions`) from the pilot bucket into the existing, empty BigQuery tables, prove that they match the approved packet exactly, and revoke all loader access. **The four marts are out of scope** (M8).
 
@@ -34,7 +34,7 @@ Conventions:
 | A7 | **Cost envelope:** see §2 | Values in §2 | Evidence ledger in `report.json` |
 | A8 | **Optional read probes:** the operator-identity prefix listing (`inventory`); the L5 out-of-prefix probe, or Policy Troubleshooter instead (separate API enablement) | Yes or no for each | Evidence present or absent |
 | A9 | **Revocation:** `loader-revoke` saved plan. Recommended as pre-approved with A5, since it only removes access. **Mandatory:** the table grants do not expire on their own | Plan SHA-256 | `--mode loader-revoke` (`ok`, 6 deletes) |
-| A10 | **Post-load pilot check:** a pilot plan, **not applied** | Plan SHA-256 | `--mode pilot-loaded` (`ok`, 18 unchanged) |
+| A10 | **Post-load pilot check:** a pilot plan, **not applied**. **Precondition:** a separately approved, open M6S provisioner access window (§6.10) | Plan SHA-256, plus the M6S window's `access` and `revoke` plan SHA-256s | `--mode pilot-loaded` (`ok`, 18 unchanged) |
 | A11 | **Closure:** the redacted evidence and the M7D closure document | Report SHA-256 | Review |
 
 Rules:
@@ -262,6 +262,14 @@ Use this when a `loader-revoke` apply (or a `loader-access` apply) stops part-wa
 - The bucket and dataset policies are unchanged from M6T.
 
 ### 6.10 Pilot plan check (G6; A10) — plan only, no apply
+
+**Precondition: an open M6S provisioner access window.** Even `plan` refreshes live resources, and the pilot-dev provider always impersonates `bankpilot-dev-provisioner` (`infrastructure/terraform/main.tf`, enforced by the custody wrapper). The operator can mint that token only through the conditional `operator_impersonation` grant, which exists only inside an [M6S window](m6s_validation.md). The base custody file keeps `provisioner_access_enabled = false`, and the loader window never grants it. Without a window, the plan fails with **HTTP 403 `iam.serviceAccounts.getAccessToken` denied**. That is the revoked state working as designed, not a credential or provider fault (first seen in the 2026-11-17 run; [closure](m7d_closure.md#a10-blocked)).
+
+- **Run A10 only after §6.8 and §6.9 have passed**, so the loader is already revoked when provisioner access opens and the two windows never overlap.
+- Open the window exactly as in M6S, under its own approval: a temporary access file with `provisioner_access_enabled = true` and a short `access_expiry`, checked with `--mode access` (2 creates, 15 unchanged). Do **not** set `loader_access_enabled` or reuse `bootstrap-dev-loader.tfvars`.
+- Afterwards, revoke with the base file only (`--mode revoke`, 2 deletes), back up and `verify-download`, remove the access file, and confirm that a provisioner token mint is denied.
+- **If no window is approved, record A10 as *blocked*, not passed.** Closure then cannot claim cloud success (§7).
+- **Never** work around the 403: do not retry, point the provider at another account, use the loader or operator identity directly, or add any grant.
 
 ```sh
 # pilot-dev plan with -var-file="$C/inputs/pilot-dev.tfvars" -out="$P" (M6S form)
