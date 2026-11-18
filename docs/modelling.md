@@ -91,3 +91,39 @@ cross-currency aggregation or simulated governance events. It does not implement
 population scoring, calibration, uncertainty, fairness, independent validation,
 model registry, APIs, investigator decisioning or GCP deployment. Different
 features/splits make old and new metrics unsuitable for direct comparison.
+
+## M9A evaluation v2
+
+```bash
+python3 -m financial_crime_ml.cli generate-data-v2 --config configs/synthetic_v2_m9a.yaml --run-id <data-id>
+python3 -m financial_crime_ml.cli evaluate-fraud-v2 --dataset-dir outputs/runs/<data-id> --run-id <eval-id>
+```
+
+M9A adds the following on top of the M1 row-local features (M1 itself is unchanged):
+- **Strictly point-in-time behavioural features.** Each uses only earlier event times and observations, never labels.
+- **Rolling-origin validation:** three expanding folds with a one-hour embargo.
+- **Champion and challenger:** a logistic regression champion and a HistGradientBoosting challenger, with a pre-registered, validation-only promotion rule.
+- **Frozen threshold:** set at the alert capacity on the last validation fold.
+- **Sealed test window:** evaluated once, after the selection is frozen and hashed.
+
+Reported metrics:
+- PR-AUC, Brier and ECE;
+- precision and recall at alert capacity and at the threshold;
+- day-block bootstrap 95% CIs;
+- currency, channel and corridor segments with minimum-support rules.
+
+The cloud reproduction requirements are part of the feature contract. Definitions, evidence and limitations are in [M9A validation](upgrade/m9a_validation.md).
+
+## M9B explainability and governance
+
+```bash
+python3 -m financial_crime_ml.cli explain-fraud-v2 --m9a-run outputs/runs/<m9a-run> --run-id <id>
+```
+
+M9B explains the frozen M9A logistic-regression champion without retraining it:
+- **Contributions:** exact per-decision logit contributions, verified against the original model's logits within 1e-9.
+- **Reason codes:** three deterministic codes for every alert.
+- **Importance:** permutation importance on validation folds only, using fold replicas verified bit-for-bit against M9A, with Spearman rank stability across folds.
+- **Governance:** a model card and a champion/challenger decision record, both generated from the run evidence.
+
+See [M9B validation](upgrade/m9b_validation.md).

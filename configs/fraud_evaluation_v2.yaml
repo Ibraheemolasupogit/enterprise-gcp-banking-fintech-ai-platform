@@ -1,0 +1,19 @@
+# M9A evaluation v2. Model families and the point-in-time feature contract are fixed in code
+# (evaluation/behavioural.py, evaluation/evaluation_v2.py); only these settings vary.
+seed: 42
+test_fraction: 0.2            # final, sealed test window (latest events)
+folds: 3                      # rolling-origin, expanding window
+embargo_seconds: 3600         # training rows within 1 h before each validation start are dropped
+operating_capacity: 0.05      # frozen threshold = score at 5% alert rate on the last validation fold
+capacities: [0.01, 0.02, 0.05, 0.10]
+bootstrap_resamples: 1000
+confidence: 0.95
+ece_bins: 10
+segment_min_rows: 200
+segment_min_class: 20         # minimum positives and negatives per reported segment
+challenger_ece_tolerance: 0.02
+logistic_c: 1.0
+hgb_max_iter: 200
+hgb_learning_rate: 0.05
+hgb_max_leaf_nodes: 15
+hgb_l2_regularization: 1.0

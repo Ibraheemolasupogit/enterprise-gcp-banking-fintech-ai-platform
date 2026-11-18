@@ -54,6 +54,18 @@ def main(argv: list[str] | None = None) -> None:
         verify_main(args[1:])
         return
 
+    if args and args[0] == "explain-fraud-v2":
+        from financial_crime_ml.governance.m9b_workflow import explain_main
+
+        explain_main(args[1:])
+        return
+
+    if args and args[0] == "evaluate-fraud-v2":
+        from financial_crime_ml.evaluation.evaluation_v2 import evaluation_v2_main
+
+        evaluation_v2_main(args[1:])
+        return
+
     if args and args[0] in {"render-mart-bundle", "verify-mart-evidence", "mart-expectations"}:
         from financial_crime_ml.deployment import marts_bundle
 
