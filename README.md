@@ -106,7 +106,7 @@ Key architecture documents:
 | Monitoring and drift outputs | Vertex AI Model Monitoring concept, Cloud Logging, BigQuery monitoring tables |
 | Governance evidence pack | Cloud Storage evidence bucket, BigQuery audit tables, Dataplex-style metadata |
 
-This mapping is a target design. Only a small dev pilot (one Storage bucket and one BigQuery dataset with seven **empty** tables) has been deployed, by the operator; see [M6 GCP pilot status](#m6-gcp-pilot-status). None of the other services listed is deployed.
+This mapping is a target design. Only a small dev pilot has been deployed, by the operator, through approval gates: one Storage bucket and one BigQuery dataset with eight tables holding **synthetic data only** (three input tables, four analytics marts and one score table). See [M6 GCP pilot status](#m6-gcp-pilot-status) and [M7–M9 status](#m7m9-governed-cloud-pilot-and-ml-status). None of the other services listed is deployed.
 
 ## Local Quickstart
 
@@ -240,6 +240,8 @@ tests/                    Pytest test suite
 | 11 | GCP reference architecture and deployment blueprint |
 | 12 | Final portfolio polish and end-to-end walkthrough |
 
+These are the original legacy milestones. Upgrade milestones M1–M9 are described in the sections above and below, with the cloud pilot under [M7–M9 status](#m7m9-governed-cloud-pilot-and-ml-status).
+
 ## Portfolio Positioning
 
 This project demonstrates financial crime ML engineering, scalable pipeline design, transparent scoring, monitoring, model governance, and GCP-aligned production thinking. It is intended to show practical Python engineering across the full synthetic ML lifecycle rather than a narrow notebook-only model exercise.
@@ -250,7 +252,7 @@ All datasets and outputs are synthetic demonstration artifacts. They must not be
 
 ## Non-Production Disclaimer
 
-This repository is not production deployment. Its local workflows do not create cloud infrastructure, service accounts, credentials, APIs, BigQuery tables, Pub/Sub topics, Dataflow jobs, Vertex AI pipelines, dashboards, model registry integrations, or live monitoring services. The only cloud resources are the small M6 dev pilot that the operator applied manually through approval gates: the IAM bootstrap, one Storage bucket, one BigQuery dataset and seven **empty** tables. No data has been loaded into it and no workload runs there (see [GCP pilot status](#m6-gcp-pilot-status)).
+This repository is not production deployment. Its local workflows do not create cloud infrastructure, service accounts, credentials, APIs, BigQuery tables, Pub/Sub topics, Dataflow jobs, Vertex AI pipelines, dashboards, model registry integrations, or live monitoring services. The only cloud resources are the small dev pilot that the operator applied manually through approval gates: the IAM bootstrap, one Storage bucket, one BigQuery dataset and eight tables of synthetic data. Cloud workloads ran there only as single operator-approved batch jobs, inside time-bound access windows that were then revoked. Nothing is scheduled or runs continuously (see [M7–M9 status](#m7m9-governed-cloud-pilot-and-ml-status)).
 
 ## Limitations
 
@@ -258,19 +260,17 @@ This repository is not production deployment. Its local workflows do not create 
 - Model metrics are demonstration metrics and not evidence of production suitability.
 - Rule-based AML, network, and NLP logic is intentionally transparent and lightweight.
 - Monitoring is local and file-based, not a live operational service.
-- GCP alignment is mostly architecture and deployment planning. The deployed dev pilot holds empty tables only; there is no cloud data ingestion, cloud workload or production hardening.
+- GCP alignment beyond the dev pilot is architecture and deployment planning. The pilot ran governed one-off synthetic batch loads and BigQuery jobs only. There is no scheduled or streaming workload, serving endpoint, live monitoring or production hardening.
 - Human investigation, validation, governance approval, and compliance review would be required before any production use.
 
 ## Future Enhancements
 
-- Infrastructure-as-code examples in a separate, non-credentialed deployment milestone
 - Containerised batch workflow packaging
-- BigQuery SQL feature engineering examples
 - Vertex AI training pipeline prototype
 - Looker Studio-ready reporting layer
 - Investigator feedback loop design
 - Model registry and approval workflow integration
-- Expanded fairness, explainability, and typology evaluation documentation
+- Expanded fairness and typology evaluation documentation
 
 ### M3 local financial data foundation
 
@@ -295,6 +295,28 @@ M6 took the M5 design through gated, operator-run deployment in the dedicated de
 - the temporary provisioner access was revoked and impersonation was confirmed denied;
 - encrypted pilot and bootstrap state backups were verified after a OneDrive round-trip.
 
-**This is not production readiness and not cloud data ingestion.** No object has been uploaded, no load or query job has run, and the [outstanding limitations](docs/upgrade/m6t_validation.md#outstanding-limitations) still apply.
+**This is not production readiness.** At M6T the tables were empty and no job had run. M7D–M9D (below) loaded and processed synthetic data under their own approvals. The [M6T limitations](docs/upgrade/m6t_validation.md#outstanding-limitations) are carried into those closures.
 
-**Next: M7**, offline preparation for a controlled synthetic GCS-to-BigQuery ingestion. Any actual upload or load needs its own approved access window.
+### M7–M9 governed cloud pilot and ML status
+
+All cloud and Terraform steps were run by the operator under separate, SHA-pinned approvals. Each access window was time-bound, checked by two independent verifiers, and revoked and read back afterwards. Synthetic data only.
+
+| Milestone | What it demonstrates | Evidence |
+| --- | --- | --- |
+| **M7D** governed cloud ingestion | A dedicated keyless loader loaded the 4,250-row synthetic packet into the three input tables, byte-identical on read-back. The loader grants were revoked | [M7D closure](docs/upgrade/m7d_closure.md) (closed with limitations; its A10 check was later closed in M9D) |
+| **M8** BigQuery analytical marts | The runner built the four marts (11,914 rows) in one transactional script, reconciled per currency to the 4,000 transactions. The runner window was revoked (8/8 PASS) | [M8 closure](docs/upgrade/m8_closure.md) |
+| **M9A** chronological model evaluation | Point-in-time behavioural features, rolling-origin folds, logistic regression champion vs gradient-boosting challenger, validation-only threshold, sealed test window, bootstrap CIs | [M9A validation](docs/upgrade/m9a_validation.md) |
+| **M9B** explainability | Exact per-feature contributions, reason codes, permutation importance with stability, and a model card and decision record generated from evidence | [M9B validation](docs/upgrade/m9b_validation.md) |
+| **M9C** portable scoring and parity | A hashed, canonical model specification (v2). GoogleSQL scoring is generated from it, with exact Python/SQL parity on every row, an integer alert rule and a label-free PSI monitoring reference | [M9C validation](docs/upgrade/m9c_validation.md) |
+| **M9D** controlled BigQuery scoring | Gated score-table deployment (which also closed M7D's A10). The runner scored 4,000 rows in BigQuery with **0 parity mismatches** (198 alerts) and stable drift (PSI). The runner window was revoked, with live verification 8/8 PASS | [M9D closure](docs/upgrade/m9d_closure.md) |
+
+**Approval scope.** The model decision record (`DR-M9B`) is approved only for offline development and this controlled synthetic-data pilot. **Production approval remains pending.** Billing evidence and the token-minting audit-log mapping are carried forward ([M9D G7 decisions](docs/upgrade/m9d_closure.md#g7-decisions-approved-2026-11-18)).
+
+**Remaining cloud resources and cost controls.**
+- **What remains:** the dev pilot in `europe-west2`.
+  - One versioned Storage bucket, holding the uploaded synthetic packet objects (about 1.1 MB; no deletion is recorded).
+  - One BigQuery dataset with eight deletion-protected tables: 4,250 input rows, 11,914 mart rows and 4,000 score rows.
+  - Dormant, keyless runner, loader and provisioner service accounts, with no open access window.
+- **What it costs:** nothing is scheduled, and storage is a few megabytes. The pilot's billed jobs totalled tens of MiB (BigQuery job statistics, not an invoice).
+- **No spending cap:** the project's £5 monthly budget sends **alerts at 50/80/100%. It is not a spending cap**, and nothing stops charges automatically.
+- **Cleanup:** Gate D (teardown) has not started ([pilot plan](docs/gcp_pilot_plan.md)). Deleting the pilot needs its own approval.

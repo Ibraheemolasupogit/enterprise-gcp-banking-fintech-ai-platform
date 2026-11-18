@@ -10,7 +10,7 @@ Read only selected local SDK configuration fields and credential-database **acco
 | --- | --- |
 | Installed tools | gcloud **536.0.1** and bq under `/opt/homebrew/share/google-cloud-sdk/bin/`; no installation needed |
 | Project | Active local `default` configuration names **`virtual-rarity-470405-c5`**. This is a candidate only; existence, ownership, dedicated-sandbox suitability and pilot approval are **unverified**. No concrete tfvars or `TF_VAR_*` inputs found |
-| Operator account | Configured and locally cached account ID **`ibraheemolasupo@yahoo.com`**. Credential validity, effective permissions and authorization to act are unknown |
+| Operator account | Configured and locally cached account ID **`<operator-email-redacted>`**. Credential validity, effective permissions and authorization to act are unknown |
 | ADC | No standard ADC file, `GOOGLE_APPLICATION_CREDENTIALS` override or `.bigqueryrc` found. gcloud's cached login is not proof of Terraform ADC availability. Any required ADC setup/impersonation credential minting needs separate explicit approval; no key files proposed |
 | Region | Terraform permits only **`europe-west2`** for bucket/dataset. Local compute default is **`us-east1`**, zone `us-east1-b`; do not inherit it or silently change IaC. Confirm London; explicitly name project/location on future calls |
 | Billing | Actual billing account ID, existing project link, account-open/billing-enabled state, currency, billing administrator and alert recipients are **unknown**. Require an already authorized existing billing arrangement; missing linkage/billing must return for separate approval |

@@ -48,4 +48,7 @@ All cloud and Terraform steps were run by the operator under separate approvals 
 | Data and workloads | **None.** No upload, load, query or mart build | No cloud data ingestion is claimed |
 | Production readiness | **Not claimed** | No VPC-SC, CMEK, org policies, group ownership, alerting or hard spending cap |
 
-**Next: M7**, offline preparation for a controlled synthetic GCS-to-BigQuery ingestion (Gate C of the [pilot runbook](../gcp_pilot_plan.md)). It executes no cloud work.
+The table above is the M6T snapshot. **Current status (2026-11-18):**
+- **Data and workloads:** M7D loaded the synthetic input tables ([closure](m7d_closure.md)), M8 built the marts ([closure](m8_closure.md)), and M9A–M9C added chronological evaluation, explainability and portable scoring offline. M9D then scored the packet in BigQuery with exact parity, and the runner was revoked ([closure](m9d_closure.md)).
+- **Production readiness:** still **not claimed**, and production approval is pending.
+- **Spending:** the £5 budget sends alerts only; there is no hard spending cap. Gate D cleanup has not started.

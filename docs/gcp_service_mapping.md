@@ -2,7 +2,7 @@
 
 This table maps the local repository artifacts to a target GCP service design. It is a reference architecture artifact, not a statement of what is deployed.
 
-**Deployment status (M6T, operator-reported):** only a dev pilot's **infrastructure** exists: one Cloud Storage bucket and one BigQuery dataset with seven **empty** tables, plus their scoped IAM ([M6T](upgrade/m6t_validation.md)). No workload in this table has been executed in GCP: no ingestion or loading, no BigQuery analytics, no Dataflow, Vertex AI, Cloud Run, Pub/Sub, Looker Studio or monitoring service, and no production operation.
+**Deployment status (M9D closure, 2026-11-18):** only a dev pilot exists: one Cloud Storage bucket and one BigQuery dataset with eight tables of synthetic data, plus their scoped IAM. From this table, only **BigQuery** has run workloads, and only as single operator-approved batch jobs: the M7D loads, the M8 mart build and the M9D scoring ([M9D closure](upgrade/m9d_closure.md)). There is no Dataflow, Vertex AI, Cloud Run, Pub/Sub, Looker Studio or monitoring service, no scheduled workload and no production operation. At M6T only the empty infrastructure existed ([M6T](upgrade/m6t_validation.md)).
 
 | Local artifact | Local module/script | Target GCP service | Production responsibility | Governance/audit consideration |
 | --- | --- | --- | --- | --- |

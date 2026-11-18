@@ -45,7 +45,7 @@ The dataset `bankpilot_dev` gets **exactly two intended bindings, both unconditi
 
 | Role | Member |
 | --- | --- |
-| `roles/bigquery.dataOwner` (the direct owner) | `user:ibraheemolasupo@yahoo.com` |
+| `roles/bigquery.dataOwner` (the direct owner) | `user:<operator-email-redacted>` |
 | `projects/ebank-pilot-dev-261031-k7m4/roles/bankpilot_dev_metadata` | `serviceAccount:bankpilot-dev-runner@ebank-pilot-dev-261031-k7m4.iam.gserviceaccount.com` |
 
 - **The provisioner's creator OWNER entry and the special-group defaults are removed** by the authoritative replacement.
@@ -75,12 +75,12 @@ Alternatives considered and not adopted:
 The private pilot inputs file and the custody tree were not touched. **Operator action** (manual, in the protected custody file `$C/inputs/pilot-dev.tfvars`, mode 600), add exactly:
 
 ```hcl
-dataset_owner_member        = "user:ibraheemolasupo@yahoo.com"
+dataset_owner_member        = "user:<operator-email-redacted>"
 ```
 
 ## Bounded recovery checker
 
-`python3 scripts/bootstrap_plan_check.py --mode pilot-recovery --dataset-owner=user:ibraheemolasupo@yahoo.com` passes only if all of the following hold:
+`python3 scripts/bootstrap_plan_check.py --mode pilot-recovery --dataset-owner=user:<operator-email-redacted>` passes only if all of the following hold:
 - **The owner:** the approved owner is valid, as above, and equals the plan's `dataset_owner_member` variable. It is never printed; the report shows only `dataset_owner_approved`.
 - **The changes:** exactly **one create**, `module.bigquery.google_bigquery_dataset_iam_policy.metadata`, and the **17 created resources as `no-op`**.
 - **The dataset policy:** exactly `{"bindings": [...]}` with exactly the two D1 bindings, in any order, with no conditions or extra keys.
@@ -316,10 +316,10 @@ The pilot-recovery requirements are unchanged: one dataset-policy create, 17 no-
 5. **G5, recovery plan:**
    - the plan uses the pilot inputs with the new line;
    - Terraform reports **`1 to add, 0 to change, 0 to destroy`**;
-   - the checker, run as `show -json "$P" | python3 scripts/bootstrap_plan_check.py --mode pilot-recovery --dataset-owner=user:ibraheemolasupo@yahoo.com`, gives `ok: true`, `creates 1`, `unchanged 17`, `dataset_owner_approved: true`;
+   - the checker, run as `show -json "$P" | python3 scripts/bootstrap_plan_check.py --mode pilot-recovery --dataset-owner=user:<operator-email-redacted>`, gives `ok: true`, `creates 1`, `unchanged 17`, `dataset_owner_approved: true`;
    - approve the SHA-256, then apply;
    - immediately back up the pilot state (upload and `verify-download`).
-6. **G6, verify:** read back the dataset access. It must hold exactly `ibraheemolasupo@yahoo.com` as OWNER and the runner with the metadata role: no provisioner, no special groups. The tables and table grants are unchanged.
+6. **G6, verify:** read back the dataset access. It must hold exactly `<operator-email-redacted>` as OWNER and the runner with the metadata role: no provisioner, no special groups. The tables and table grants are unchanged.
 7. **G7, revoke:** M6S runbook E (`--mode revoke`, bootstrap backup, E5 read-back).
 
 **Failure handling:**
