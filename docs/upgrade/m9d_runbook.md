@@ -2,7 +2,7 @@
 
 Prepared offline on 2026-11-18. The operator runs every step by hand in Terminal.app, never in Claude Code.
 
-**Status (2026-11-18):** G0 passed at `dd33113`, and G1 was applied. **G2 was a NO-GO, and the pilot plan was not applied.** G3 revoked the provisioner (8/8 PASS). Recovery runs through G0′ → G1′ → G2′ → G3′ (§2a). **G2′ was not applied either:** its independent verification wrongly expected no output changes. G3′ revoked the provisioner (8/8 PASS), and the expectation is corrected under G0″ (§2b). **G2″ deployed the score table and closed A10, and G3″ revoked the provisioner (§2c).** Next is G4, the runner window, with a new baseline capture under the extended check R3. M9D:
+**Status (2026-11-18):** G0 passed at `dd33113`, and G1 was applied. **G2 was a NO-GO, and the pilot plan was not applied.** G3 revoked the provisioner (8/8 PASS). Recovery runs through G0′ → G1′ → G2′ → G3′ (§2a). **G2′ was not applied either:** its independent verification wrongly expected no output changes. G3′ revoked the provisioner (8/8 PASS), and the expectation is corrected under G0″ (§2b). **G2″ deployed the score table and closed A10, and G3″ revoked the provisioner (§2c).** G4 (runner window), G5 (scoring: exact parity, 4,000 rows, 198 alerts) and G6 (runner revoke, 8/8 PASS) followed; G7 approved the closure ([M9D closure](m9d_closure.md)): the controlled synthetic-data pilot is complete, and production approval remains pending. M9D:
 1. creates the score table;
 2. completes the overdue M7D A10 check, inside **one provisioner window**;
 3. scores the 4,000-row M7B pilot packet with model spec v2 (`38180198…39e0`), as the runner, inside **one runner window**;
