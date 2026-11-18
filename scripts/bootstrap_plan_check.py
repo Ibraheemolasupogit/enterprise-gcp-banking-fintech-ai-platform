@@ -78,6 +78,15 @@ Pilot root modes (both require --dataset-owner=user:<approved owner>; M6T):
                   Requires --packet-dir and --expected-manifest-sha256. Refresh drift is
                   accepted only as exact loads: the three inputs to the packet's rows/bytes
                   (as pilot-loaded) and the four marts to the M8-verified rows/bytes.
+                  M9D G2 (evidenced by the failed G2 plan), and nothing else:
+                  * marts were written by M8 DML: rows, bytes and last_modified_time change,
+                    the etag stays identical, and all four share one modification time;
+                  * the dataset: state still holds the creation-time access (provisioner
+                    OWNER + three project special groups); live access must be exactly the
+                    approved owner (OWNER) and the runner (metadata role), with only access,
+                    etag and last_modified_time changing; the dataset policy is unchanged;
+                  * the runner's members on the three input tables: etag only (M7D loader
+                    grants rewrote those table policies), values the approved member.
 
 Exit 0 when ok, 1 when the plan has problems, 2 when the input cannot be parsed.
 
@@ -1031,8 +1040,17 @@ def _is_int(value: object, want: int) -> bool:
     return type(value) is int and value == want
 
 
-def loaded_drift_problems(rc: dict, planned: datetime | None, spec: dict) -> list[str]:
-    """One input table's refresh drift after the load: only rows, bytes, etag and time."""
+def loaded_drift_problems(rc: dict, planned: datetime | None, spec: dict,
+                          dml: bool = False) -> list[str]:
+    """One table's refresh drift after its load: only rows, bytes, etag and time.
+
+    ``dml`` (M9D, pilot-scores marts only): M8 filled the marts with DML inside one script
+    transaction, and BigQuery leaves a table's ``etag`` unchanged for DML (evidenced by the
+    failed G2 plan: state etag from creation == M8 read-back etag). So a mart's drift must
+    change exactly rows, bytes and time, and its etag must stay identical.
+    """
+    if dml:
+        return _mart_dml_drift_problems(rc, planned, spec)
     addr = rc.get("address")
     change = rc.get("change") or {}
     before, after = change.get("before"), change.get("after")
@@ -1066,6 +1084,156 @@ def loaded_drift_problems(rc: dict, planned: datetime | None, spec: dict) -> lis
                                          after["last_modified_time"], planned, _epoch_ms)
         if issue:
             problems.append(f"{addr}: {issue}")
+    return problems
+
+
+# ---- M9D G2: refresh drift evidenced by the failed G2 plan (pilot-scores only) ----
+# Each rule below accepts one precisely evidenced change and nothing near it.
+MART_DML_DRIFT_ATTRS = frozenset({"num_rows", "num_bytes", "last_modified_time"})
+DATASET_ADDRESS = "module.bigquery.google_bigquery_dataset.foundation"
+DATASET_ACCESS_DRIFT_ATTRS = frozenset({"access", "etag", "last_modified_time"})
+ACCESS_ENTRY_KEYS = frozenset({"condition", "dataset", "domain", "group_by_email",
+                               "iam_member", "role", "routine", "special_group",
+                               "user_by_email", "view"})
+# BigQuery's default access at dataset creation (creator = provisioner, plus the three
+# project special groups), still recorded in state; the M6T authoritative dataset policy
+# replaced it live on 2026-11-10.
+DATASET_CREATION_ACCESS = frozenset({("OWNER", "user_by_email", PROVISIONER_EMAIL),
+                                     ("OWNER", "special_group", "projectOwners"),
+                                     ("READER", "special_group", "projectReaders"),
+                                     ("WRITER", "special_group", "projectWriters")})
+# M7D loader-access/loader-revoke rewrote the IAM policy of exactly the three input tables,
+# so the runner's (unchanged) member on each records a new etag.
+INPUT_MEMBER_ADDRESSES = {
+    f'module.bigquery.google_bigquery_table_iam_member.runner["{t}"]': t
+    for t in sorted(READER_TABLES)}
+
+
+def _update_drift(rc: dict, kind: str, name: str,
+                  index: object) -> tuple[list[str], dict, dict, set[str]]:
+    """Common shape of an accepted refresh drift: exact managed address and type, action
+    exactly ``update``, identical attribute sets, no unknown values."""
+    addr = rc.get("address")
+    change = rc.get("change") or {}
+    before, after = change.get("before"), change.get("after")
+    if (rc.get("mode", "managed") != "managed" or rc.get("type") != kind
+            or rc.get("name") != name or rc.get("index") != index):
+        return [f"drift detected outside Terraform: {addr}"], {}, {}, set()
+    if change.get("actions") != ["update"]:
+        return [f"drift detected outside Terraform: {addr} {change.get('actions')}"], {}, {}, \
+            set()
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        return [f"{addr}: drift lacks before/after values"], {}, {}, set()
+    if set(before) != set(after):
+        return [f"{addr}: drift attribute sets differ"], {}, {}, set()
+    if _has_unknown(change.get("after_unknown")):
+        return [f"{addr}: drift has unknown values"], {}, {}, set()
+    return [], before, after, {k for k in before if before[k] != after[k]}
+
+
+def _mart_dml_drift_problems(rc: dict, planned: datetime | None, spec: dict) -> list[str]:
+    addr = rc.get("address")
+    key = re.fullmatch(r'module\.bigquery\.google_bigquery_table\.products\["([a-z_]+)"\]',
+                       str(addr))
+    problems, before, after, changed = _update_drift(
+        rc, "google_bigquery_table", "products", key.group(1) if key else None)
+    if problems:
+        return problems
+    if "etag" in changed:
+        problems.append(f"{addr}: a DML load must leave the table etag unchanged")
+    if changed - MART_DML_DRIFT_ATTRS - {"etag"}:
+        problems.append(f"{addr}: drift changes non-load attributes: "
+                        f"{sorted(changed - MART_DML_DRIFT_ATTRS - {'etag'})}")
+    if not MART_DML_DRIFT_ATTRS <= changed:
+        problems.append(f"{addr}: a DML load must change num_rows, num_bytes and "
+                        "last_modified_time together")
+    if not (_is_int(before.get("num_rows"), 0) and _is_int(before.get("num_bytes"), 0)):
+        problems.append(f"{addr}: drift does not start from an empty table")
+    if not (_is_int(after.get("num_rows"), spec["num_rows"])
+            and _is_int(after.get("num_bytes"), spec["num_bytes"])):
+        problems.append(f"{addr}: rows or logical bytes differ from the approved M8 load")
+    if not all(isinstance(v, str) and v for v in (before.get("etag"), after.get("etag"))):
+        problems.append(f"{addr}: etag is not a non-empty string")
+    if "last_modified_time" in changed:
+        issue = _timestamp_moved_forward("last_modified_time", before["last_modified_time"],
+                                         after["last_modified_time"], planned, _epoch_ms)
+        if issue:
+            problems.append(f"{addr}: {issue}")
+    return problems
+
+
+def _access_entries(access: object) -> set[tuple[str, str, str]] | None:
+    """Dataset ``access`` as (role, kind, value) entries, or None if any entry is not a
+    plain user or special-group grant (views, routines, datasets, domains, groups, IAM
+    members and conditions are never accepted)."""
+    if not isinstance(access, list):
+        return None
+    entries = set()
+    for entry in access:
+        if not isinstance(entry, dict) or set(entry) != ACCESS_ENTRY_KEYS:
+            return None
+        set_keys = [k for k in ACCESS_ENTRY_KEYS - {"role"} if entry[k] not in ("", [])]
+        if len(set_keys) != 1 or set_keys[0] not in ("user_by_email", "special_group") \
+                or not isinstance(entry["role"], str) or not isinstance(entry[set_keys[0]], str):
+            return None
+        entries.add((entry["role"], set_keys[0], entry[set_keys[0]]))
+    return entries if len(entries) == len(access) else None
+
+
+def dataset_access_drift_problems(rc: dict, planned: datetime | None,
+                                  owner: object) -> list[str]:
+    """M9D G2: the dataset's state still holds BigQuery's creation-time access; live access
+    is exactly the approved authoritative policy. Accepted only if access, etag and
+    last_modified_time all change, nothing else does, the old access is exactly the
+    creation default and the new access is exactly {approved owner: OWNER, runner:
+    metadata role}. (The policy resource itself must also be unchanged; see ``_compare``.)"""
+    addr = rc.get("address")
+    problems, before, after, changed = _update_drift(
+        rc, "google_bigquery_dataset", "foundation", None)
+    if problems:
+        return problems
+    if changed != DATASET_ACCESS_DRIFT_ATTRS:
+        problems.append(f"{addr}: dataset drift must change exactly "
+                        f"{sorted(DATASET_ACCESS_DRIFT_ATTRS)}, not {sorted(changed)}")
+    if _access_entries(before.get("access")) != DATASET_CREATION_ACCESS:
+        problems.append(f"{addr}: recorded access is not the dataset creation default")
+    owner_email = str(owner).removeprefix("user:") if not dataset_owner_problems(owner) \
+        else None
+    want = {("OWNER", "user_by_email", owner_email),
+            (f"{ROLE_PREFIX}metadata", "user_by_email", RUNNER_EMAIL)}
+    if owner_email is None or _access_entries(after.get("access")) != want:
+        problems.append(f"{addr}: live access is not exactly the approved owner and the "
+                        "runner metadata role")
+    if not all(isinstance(v, str) and v for v in (before.get("etag"), after.get("etag"))):
+        problems.append(f"{addr}: etag is not a non-empty string")
+    if "last_modified_time" in changed:
+        issue = _timestamp_moved_forward("last_modified_time", before["last_modified_time"],
+                                         after["last_modified_time"], planned, _epoch_ms)
+        if issue:
+            problems.append(f"{addr}: {issue}")
+    return problems
+
+
+def input_member_etag_drift_problems(rc: dict, owner: object) -> list[str]:
+    """M9D G2: etag-only drift on the runner's member of one input table. Every other
+    attribute identical, and both sides the approved unconditional readers member."""
+    addr = rc.get("address")
+    table = INPUT_MEMBER_ADDRESSES.get(str(addr))
+    problems, before, after, changed = _update_drift(
+        rc, "google_bigquery_table_iam_member", "runner", table)
+    if problems:
+        return problems
+    if changed != {"etag"}:
+        problems.append(f"{addr}: member drift must change only etag, not {sorted(changed)}")
+    if not all(isinstance(v, str) and v for v in (before.get("etag"), after.get("etag"))):
+        problems.append(f"{addr}: etag is not a non-empty string")
+    for side in (before, after):
+        side_problems: list[str] = []
+        _check_pilot_values({"address": addr, "type": rc.get("type"),
+                             "change": {"after": side}}, side_problems, owner)
+        if side_problems:
+            problems.append(f"{addr}: drift values are not the approved runner member")
+            break
     return problems
 
 
@@ -1104,15 +1272,34 @@ def _check_pilot(plan: dict, mode: str = "pilot", owner: object = None,
     loaded_addresses = ({_table_address(t): t for t in loaded_tables_map}
                         if mode in LOADED_MODES and not load_problems else {})
     accepted_load_drift: list[str] = []
+    accepted_access_drift: list[str] = []
+    accepted_etag_drift: list[str] = []
+    mart_times: set[object] = set()
     for rc in plan.get("resource_drift") or []:
         addr = rc.get("address")
         if addr in loaded_addresses and addr not in seen:
             seen.add(addr)
+            dml = mode == "pilot-scores" and loaded_addresses[addr] in MART_TABLES
             drift_problems = loaded_drift_problems(rc, planned,
-                                                   loaded["tables"][loaded_addresses[addr]])
+                                                   loaded["tables"][loaded_addresses[addr]],
+                                                   dml=dml)
             problems.extend(drift_problems)
             if not drift_problems:
                 accepted_load_drift.append(addr)
+                if dml:
+                    mart_times.add(rc["change"]["after"]["last_modified_time"])
+        elif mode == "pilot-scores" and addr == DATASET_ADDRESS and addr not in seen:
+            seen.add(addr)
+            drift_problems = dataset_access_drift_problems(rc, planned, owner)
+            problems.extend(drift_problems)
+            if not drift_problems:
+                accepted_access_drift.append(addr)
+        elif mode == "pilot-scores" and addr in INPUT_MEMBER_ADDRESSES and addr not in seen:
+            seen.add(addr)
+            drift_problems = input_member_etag_drift_problems(rc, owner)
+            problems.extend(drift_problems)
+            if not drift_problems:
+                accepted_etag_drift.append(addr)
         elif mode == "pilot-recovery" and addr in PILOT_METADATA_DRIFT and addr not in seen:
             seen.add(addr)
             drift_problems = pilot_metadata_drift_problems(rc, planned)
@@ -1121,6 +1308,9 @@ def _check_pilot(plan: dict, mode: str = "pilot", owner: object = None,
                 accepted_metadata_drift.append(addr)
         else:
             problems.append(f"drift detected outside Terraform: {addr}")
+    if len(mart_times) > 1:
+        # M8 wrote all four marts in one committed transaction: one modification time.
+        problems.append("mart loads do not share one modification time (one M8 transaction)")
     tables = pilot_tables() + ([SCORE_TABLE] if mode == "pilot-scores" else [])
 
     def check(rc: dict) -> None:
@@ -1152,6 +1342,9 @@ def _check_pilot(plan: dict, mode: str = "pilot", owner: object = None,
     if mode in LOADED_MODES:
         report["accepted_load_drift"] = sorted(accepted_load_drift)
         report["packet_id"] = loaded.get("packet_id") if isinstance(loaded, dict) else None
+    if mode == "pilot-scores":
+        report["accepted_access_drift"] = sorted(accepted_access_drift)
+        report["accepted_etag_drift"] = sorted(accepted_etag_drift)
     report.update(mode=mode, dataset_owner_approved=not dataset_owner_problems(owner),
                   problems=problems, ok=not problems)
     return report

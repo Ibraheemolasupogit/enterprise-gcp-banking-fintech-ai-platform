@@ -1,6 +1,8 @@
 # M9D runbook: score the pilot packet in BigQuery (spec v2)
 
-Prepared offline on 2026-11-18. **Phase 1 only: nothing in this runbook has been executed.** The operator runs every step by hand in Terminal.app, never in Claude Code. M9D:
+Prepared offline on 2026-11-18. The operator runs every step by hand in Terminal.app, never in Claude Code.
+
+**Status (2026-11-18):** G0 passed at `dd33113`, and G1 was applied. **G2 was a NO-GO, and the pilot plan was not applied.** G3 revoked the provisioner (8/8 PASS). Recovery runs through G0′ → G1′ → G2′ → G3′ (§2a). M9D:
 1. creates the score table;
 2. completes the overdue M7D A10 check, inside **one provisioner window**;
 3. scores the 4,000-row M7B pilot packet with model spec v2 (`38180198…39e0`), as the runner, inside **one runner window**;
@@ -31,6 +33,26 @@ It also requires exactly two creates:
 
 Everything else is rejected, including the provisioner as member, a reader role, a condition, an update or delete, and a mart or input size drift.
 
+**Corrected after the G2 NO-GO (§2a).** The original rules required every loaded table's etag to change, and accepted no other drift. Live BigQuery showed three legitimate refresh drifts that those rules did not model. `pilot-scores` now also accepts the following, **in this mode only and nothing near them**:
+- **Marts written by M8 DML:**
+  - `num_rows`, `num_bytes` and `last_modified_time` change, and the **etag stays identical**. BigQuery does not change a table's etag for DML; the etag in state from creation equals M8's live read-back etag.
+  - Rows and bytes start at 0 and end at exactly the M8 values.
+  - The time moves forward, is not after the plan, and is the same for all four marts (one M8 transaction).
+  - The input tables still require an etag change, because they were loaded with load jobs.
+- **Dataset access reconciliation** (`google_bigquery_dataset.foundation`):
+  - Exactly `access`, `etag` and `last_modified_time` change.
+  - The recorded access is exactly BigQuery's creation default: the provisioner as OWNER, plus `projectOwners`, `projectReaders` and `projectWriters`.
+  - The live access is exactly two entries: the approved owner as OWNER, and the runner with `bankpilot_dev_metadata`.
+  - Only plain user or special-group entries are allowed. A view, routine, dataset, domain, group, IAM member, condition, extra key or duplicate is rejected.
+  - The dataset IAM policy resource must plan no change.
+- **Etag-only drift on the runner's grants on the three input tables:**
+  - Only `etag` changes, from one non-empty value to another.
+  - Both sides are the approved unconditional `bankpilot_dev_readers` grant to the runner.
+  - The cause: M7D's loader grants on these tables (added, then removed) rewrote their IAM policies.
+  - The same drift on a mart grant or the score-table grant is rejected.
+
+The checker reports these as `accepted_load_drift` (7), `accepted_access_drift` (1) and `accepted_etag_drift` (3). Drift that is already recorded in state needs no acceptance. Tests: `tests/test_pilot_scores_g2_drift.py` runs 52 tests against the real G2 drift section, with the owner replaced by a placeholder (`tests/fixtures/m9d_g2_resource_drift.redacted.json`).
+
 ## 2. Approval gates (each recorded separately, before its step)
 
 | Gate | Approves | Pinned value |
@@ -47,6 +69,52 @@ Everything else is rejected, including the provisioner as member, a reader role,
 Rules:
 - The windows never overlap. The provisioner window is fully revoked (G3, read back) before G4.
 - An approval covers exactly its pinned value. A changed plan, bundle or window needs a new approval.
+
+## 2a. G2 NO-GO (2026-11-18) and recovery
+
+### What happened
+
+| Step | Result |
+|---|---|
+| G0 | Passed at `dd331133d3c227455e0ff45141dd4f6045f633c0` |
+| G1 | Provisioner access applied; bootstrap state backup serial 63 downloaded and SHA-256 verified |
+| G2 | Pilot plan `20261118T103726Z-pilot-scores-dd33113` (plan time 2026-11-18T10:37:27Z): **NO-GO, not applied**. 2 creates, 18 unchanged and 0 deletes as expected, and the 3 input loads were accepted, but the checker reported **8 drift problems** |
+| G3 | Provisioner revoke applied; read back 8/8 PASS; bootstrap backup serial 66 verified |
+
+### Preserved failure evidence (custody `plans/pilot-dev/`; never apply, edit or delete)
+
+| File | SHA-256 |
+|---|---|
+| `20261118T103726Z-pilot-scores-dd33113.tfplan` | `9b41641ee08c57d7eaa919bae77d837b7b85d77f20a4ccc525f934587c780260` |
+| `20261118T103726Z-pilot-scores-dd33113.json` | `85af86eeccaf62e51abadcb890bcf4a987460ab3f05e6844d5e60ee9e7e0f4e4` |
+
+The plan is stale, and the window it ran under is revoked. Under the original checker (at `dd33113`), the JSON still fails with the same 8 problems. Under the corrected checker it passes. That pass **does not approve it**: G2′ needs a new plan.
+
+### The eight findings (read-only diagnosis; principals checked as matches only, never printed)
+
+| # | Address | What changed | Cause | Risk |
+|---|---|---|---|---|
+| 1 | `google_bigquery_dataset.foundation` | `access`, `etag`, `last_modified_time` (last modified 2026-11-10T13:22:29Z) | State still records the creation default access from 2026-11-10T11:51:39Z: the provisioner as OWNER plus three project groups. The M6T authoritative dataset policy (pilot-recovery apply) replaced it live with exactly the approved owner and the runner (metadata role). The policy resource plans no change, so live access equals the configuration. Not seen earlier because the 2026-11-17 A10 plan stopped with a 403 | None. Live access is **narrower** than state |
+| 2–5 | `products["account_daily"]`, `["customer_daily"]`, `["operations_daily"]`, `["transaction_daily"]` | `num_rows`, `num_bytes`, `last_modified_time`; **etag unchanged** | M8's transactional DML script; all four last modified at 2026-11-18T02:03:56.723Z, the end of the M8 script job. Rows, bytes, time and etag equal the M8 read-back evidence exactly. The original rule wrongly required an etag change, and its test fixture had assumed one | None. Legitimate M8 data |
+| 6–8 | `google_bigquery_table_iam_member.runner["accounts"]`, `["curated_transactions"]`, `["customers"]` | `etag` only | The M7D loader grants on exactly these three tables were added and then removed, rewriting each table's IAM policy. Member, role (`bankpilot_dev_readers`), condition (none) and table are identical | None. Etag only |
+
+No finding is a configuration risk or a widening of IAM. The NO-GO was correct: the checker did not model these changes, so the plan was unverified.
+
+### Recovery sequence (each gate recorded separately; nothing carries over from G1–G3)
+
+| Gate | Approves | Pinned value |
+|---|---|---|
+| **G0′** | Checker correction committed (`scripts/bootstrap_plan_check.py`, the two test files, the fixture, this runbook); CI green; clean tree. The saved G2 files are unchanged (hashes above), and the corrected checker reports `ok` on the saved JSON | New commit SHA |
+| **G1′** | A **new** provisioner window: bootstrap `access` plan (2 creates, 15 unchanged), `window_hours` ≤ 3.00, `access_expiry` equal to the new `EXP` (§3 step 1) | New plan SHA-256 |
+| **G2′** | A **new** pilot plan, made after G1′ propagates, with both the checker and the independent verification passing (below). **This is the A10 record** | New plan SHA-256 |
+| **G3′** | Provisioner revoke: strict `revoke` plan (2 deletes, 15 unchanged), applied, backed up and read back 8/8 PASS before G4 | New plan SHA-256 |
+
+G4–G7 then follow unchanged.
+
+G2′ requirements:
+- It needs a **new SHA-pinned plan and fresh approval**. The failed G2 plan, its approval and its window are never reused.
+- The checker result alone is not enough: the independent verification must agree with it.
+- Re-check the SHA-256 immediately before apply. A mismatch, or any re-plan, needs a new G2′ approval.
 
 ## 3. Commands (Terminal.app; `C="$HOME/.secure/ebank-pilot-dev-261031-k7m4"`)
 
@@ -87,9 +155,35 @@ Q="$C/plans/pilot-dev/$(date -u +%Y%m%dT%H%M%SZ)-pilot-scores-$(git rev-parse --
 tfrun pilot-dev plan -input=false -var-file="$C/inputs/pilot-dev.tfvars" -out="$Q"
 shasum -a 256 "$Q"; show pilot-dev "$Q" > "${Q%.tfplan}.json"
 python3 scripts/bootstrap_plan_check.py --mode pilot-scores --dataset-owner="$OWNER" \
-  --packet-dir "$PKT" --expected-manifest-sha256 "$A2" < "${Q%.tfplan}.json"
-#   expect ok: creates 2, unchanged 18, accepted_load_drift = 7 tables  (this IS the A10 record)
-tfrun pilot-dev apply "$Q"                                                      # after G2
+  --packet-dir "$PKT" --expected-manifest-sha256 "$A2" < "${Q%.tfplan}.json"; echo "exit=$?"
+#   expect exit 0, ok, problems [] (this IS the A10 record):
+#     creates 2 (products["transaction_risk_scores"], runner["transaction_risk_scores"]),
+#     unchanged 18, deletes 0, packet_id m7p-a89332976c69d583137f9323,
+#     accepted_load_drift 7   (3 inputs + 4 marts),
+#     accepted_access_drift 1 (google_bigquery_dataset.foundation),
+#     accepted_etag_drift 3   (runner["accounts"|"curated_transactions"|"customers"])
+#   Fewer drift entries are fine only if that drift is already recorded in state.
+# Independent verification (addresses and actions only; no values printed); must agree:
+python3 -I - "${Q%.tfplan}.json" <<'PY'
+import collections, json, sys
+p = json.load(open(sys.argv[1]))
+rc = p.get("resource_changes") or []
+print("errored:", p.get("errored"))
+print("actions:", dict(collections.Counter("+".join(r["change"]["actions"]) for r in rc)))
+for r in rc:
+    if r["change"]["actions"] != ["no-op"]:
+        print("CHANGE", r["change"]["actions"], r["address"])
+for r in p.get("resource_drift") or []:
+    print("DRIFT ", r["change"]["actions"], r["address"])
+print("data sources:", sum(r.get("mode", "managed") != "managed" for r in rc))
+print("output changes:", [k for k, v in (p.get("output_changes") or {}).items()
+                          if v.get("actions") != ["no-op"]])
+PY
+#   expect: errored False; actions {'no-op': 18, 'create': 2}; exactly the 2 CHANGE creates;
+#   at most 11 DRIFT ['update'] lines, only on the 7 tables, the dataset and the 3 input
+#   runner members (any other address or action: stop); data sources 0; output changes [].
+shasum -a 256 "$Q"                                   # the G2′ pinned value; re-check before apply
+tfrun pilot-dev apply "$Q"                                                      # after G2′
 python3 scripts/state_backup.py create --root pilot-dev      # then upload + verify-download
 unset OWNER
 
@@ -165,7 +259,9 @@ The £5 budget only alerts; it is not a spending cap.
 
 1. Any non-success response, checker or verifier problem: **stop**. Never retry with different settings, widen a role, raise a cap, edit a plan or bundle, or remove a condition.
 2. Run the provisioner and runner windows strictly in sequence. If a window comes within 15 minutes of its expiry, stop work and revoke.
-3. **A10 or `pilot-scores` failure:** do not apply the pilot plan. Revoke the provisioner and record the problem. A drift on a mart or input that is not the exact expected load means the data changed: stop and investigate.
+3. **A10 or `pilot-scores` failure:** do not apply the pilot plan. Revoke the provisioner and record the problem. A drift on a mart or input that is not the exact expected load means the data changed: stop and investigate. (This rule was applied at G2 on 2026-11-18; see §2a.)
+   - Never extend the checker to make a failing plan pass. Any correction is an offline change, backed by evidence and paired with tests, and needs its own G0′ commit plus a new window and plan.
+   - A disagreement between the checker and the independent verification is a failure.
 4. **Job ID already exists (HTTP 409):** inspect with `job` and never resubmit. A deliberate re-run needs a new bundle (`--attempt 2`) and a new approval.
 5. **`jobs.list` (children) denied:** record it as a limitation and never add a grant.
 6. **Parity mismatch** (any row or column): stop. Do not overwrite or re-run until reviewed. The score table can be left in place; it is deletion-protected and holds synthetic scores only.

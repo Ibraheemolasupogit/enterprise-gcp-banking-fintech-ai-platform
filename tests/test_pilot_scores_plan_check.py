@@ -59,7 +59,9 @@ def scores_plan() -> dict:
     drift = []
     for name in (*tl.INPUTS, *MARTS):
         after = copy.deepcopy(tl.rc_of(plan, name)["change"]["before"])
-        before = {**after, "num_rows": 0, "num_bytes": 0, "etag": "empty",
+        # Inputs: load jobs change the etag. Marts: M8 DML leaves it identical (M9D G2).
+        before = {**after, "num_rows": 0, "num_bytes": 0,
+                  "etag": "empty" if name in tl.INPUTS else after["etag"],
                   "last_modified_time": tl.PLANNED_MS - 9_000_000}
         drift.append({"address": tl.table(name), "mode": "managed",
                       "type": "google_bigquery_table", "name": "products", "index": name,
@@ -118,6 +120,8 @@ BAD = {
          "address": SCORE_MEMBER.replace("transaction_risk_scores", "customers")}),
     "mart rows differ from M8": lambda p: tl.drift_of(p, "customer_daily")["change"][
         "after"].update(num_rows=3411),
+    "mart etag changed": lambda p: tl.drift_of(p, "customer_daily")["change"][
+        "before"].update(etag="other"),
     "input rows differ": lambda p: tl.drift_of(p, "customers")["change"]["after"].update(
         num_rows=99),
     "mart schema drift": lambda p: tl.drift_of(p, "account_daily")["change"]["after"].update(
