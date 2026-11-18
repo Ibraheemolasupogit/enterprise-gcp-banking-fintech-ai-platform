@@ -2,7 +2,7 @@
 
 Prepared offline on 2026-11-18. The operator runs every step by hand in Terminal.app, never in Claude Code.
 
-**Status (2026-11-18):** G0 passed at `dd33113`, and G1 was applied. **G2 was a NO-GO, and the pilot plan was not applied.** G3 revoked the provisioner (8/8 PASS). Recovery runs through G0′ → G1′ → G2′ → G3′ (§2a). **G2′ was not applied either:** its independent verification wrongly expected no output changes. G3′ revoked the provisioner (8/8 PASS), and the expectation is corrected under G0″ (§2b). M9D:
+**Status (2026-11-18):** G0 passed at `dd33113`, and G1 was applied. **G2 was a NO-GO, and the pilot plan was not applied.** G3 revoked the provisioner (8/8 PASS). Recovery runs through G0′ → G1′ → G2′ → G3′ (§2a). **G2′ was not applied either:** its independent verification wrongly expected no output changes. G3′ revoked the provisioner (8/8 PASS), and the expectation is corrected under G0″ (§2b). **G2″ deployed the score table and closed A10, and G3″ revoked the provisioner (§2c).** Next is G4, the runner window, with a new baseline capture under the extended check R3. M9D:
 1. creates the score table;
 2. completes the overdue M7D A10 check, inside **one provisioner window**;
 3. scores the 4,000-row M7B pilot packet with model spec v2 (`38180198…39e0`), as the runner, inside **one runner window**;
@@ -161,6 +161,35 @@ Next steps:
 - **G0″:** this documentation-only commit, with CI green and a clean tree.
 - Then a new provisioner window, a new SHA-pinned pilot plan with fresh approval, and revocation, under the same rules as G1′/G2′/G3′ (§2a), with **both** checks passing.
 
+## 2c. G2″ deployed, G3″ revoked, A10 closed (2026-11-18)
+
+G0″ was commit `db00e11` (the documentation-only output correction). Under it, the provisioner window G1″, the pilot plan G2″ and the revocation G3″ ran in sequence. All of them are in custody `plans/`; never edit or delete them.
+
+| Gate | Evidence | SHA-256 | Checker result (re-run offline at `db00e11`) |
+|---|---|---|---|
+| G1″ | `bootstrap/20261118T145902Z-provisioner-access-db00e11.tfplan` | `28154dec34f8e3af539099197397d9374237b1ee0c79b8e35816435ad43a4de8` | `access` ok: 2 creates, 15 unchanged; plan 14:59:03Z, expiry 17:58:00Z (`window_hours` 2.98) |
+| | `….json` | `4553172c02d9015740929a7ab4aa4d57b49ed75b649e965cd3669e6ce80b6eb8` | |
+| **G2″ (A10)** | `pilot-dev/20261118T150610Z-pilot-scores-db00e11.tfplan` (**applied**) | `7a89e55f2d96a82926229c079c2766081c900373cec4d7ab5e876195f8909bb7` | `pilot-scores` ok: 2 creates, 18 unchanged, 0 deletes; `accepted_load_drift` 7, `accepted_access_drift` 1, `accepted_etag_drift` 3; no problems; only output change is `inventory` (+`transaction_risk_scores`) |
+| | `….json` | `ddc1cc67fee6e09853bc469b9aa28f9e000805436d4d7cbad8a668a17ed6e07c` | |
+| G3″ | `bootstrap/20261118T151137Z-provisioner-revoke-db00e11.tfplan` (applied) | `eb8515b3558995b01b4b8865615fa61013058563dac553ec7adc4ea0f48823f2` | `revoke` ok: 2 deletes, 15 unchanged |
+| | `….json` | `cc9bf5288c582fadbcee169fda464471ff12fdd88db7a8da96b7a25af1da61a9` | |
+| Read-back | `m8/runner-revoked-20261118T151610Z` | none (directory) | 8/8 PASS (the operator's run, under the seven-table R3 of the time) |
+| Backups | bootstrap serials 75 (after G1″) and 78 (after G3″); pilot-dev serial 24 (after G2″) | none | Created per the ledger. The ledger records only creation, so upload and verified download are the operator's record (**confirm before G4**) |
+
+**A10 closure.** M7D A10 (`m7d_closure.md`, recorded as "blocked") is **closed by G2″**. It ran in its own approved provisioner window, opened after the M7D revocation, as runbook §6.10 requires. The pilot plan passed the strict `pilot-scores` mode, which keeps every A10 assertion:
+- the 18 resources are unchanged;
+- the inputs match the packet's rows and bytes exactly;
+- the marts match the M8-verified sizes exactly;
+- every other drift is only the evidenced change in §2a.
+
+The plan also passed the independent verification (§3 step 2). The blocked M7D run (`20261117T103311Z-pilot-loaded.tfplan`) and the two NO-GO plans (§2a, §2b) stay as evidence and must never be applied.
+
+**R3 now covers the score table** (pre-G4 hardening):
+- `runner_window_collect.sh` now also reads the score table's IAM policy.
+- `runner_window_verify.py` check R3 now requires it to be exactly `{role: bankpilot_dev_tables, members: [the runner]}`, with no condition or other binding. The table name is taken from the M9C contract and checked against the pilot root.
+- The other seven tables and the meaning of R1–R8 are unchanged.
+- **A capture taken before this change has no score-table policy and now fails closed** (exit 2; checked against the 15:16Z capture). G4's baseline therefore needs a **new** `revoked` capture taken with the updated collector.
+
 ## 3. Commands (Terminal.app; `C="$HOME/.secure/ebank-pilot-dev-261031-k7m4"`)
 
 Token forms are exactly as in M6P/M6S: the operator token is fetched inside `env -i … /bin/sh -c` for `plan` and `apply` only, and never appears in argv.
@@ -257,6 +286,9 @@ rm "$C/inputs/bootstrap-dev-window.tfvars"
 
 # ---- 4. Runner window (G4): docs/upgrade/m8_runbook.md §1.1 steps 1–3 exactly
 #   (runner-access plan, both checkers, apply, backup, ≥5 min, window capture 8/8 PASS)
+#   First, a NEW baseline: §1.1 step 0 with the current collector (8 table policies, including
+#   transaction_risk_scores); revoked 8/8 PASS. Captures from before the R3 extension fail
+#   closed (§2c).
 
 # ---- 5. Scoring bundle (G5), window inside the runner window's EXP
 : "${EXP:?set EXP to the runner window expiry}"; mkdir -m 700 -p "$C/m9d"

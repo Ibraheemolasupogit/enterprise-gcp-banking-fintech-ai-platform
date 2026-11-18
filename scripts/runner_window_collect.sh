@@ -14,7 +14,7 @@ DATASET="bankpilot_dev"
 RUNNER="bankpilot-dev-runner@${PROJECT}.iam.gserviceaccount.com"
 LOADER="bankpilot-dev-loader@${PROJECT}.iam.gserviceaccount.com"
 PROVISIONER="bankpilot-dev-provisioner@${PROJECT}.iam.gserviceaccount.com"
-TABLES=(customers accounts curated_transactions transaction_daily customer_daily account_daily operations_daily)
+TABLES=(customers accounts curated_transactions transaction_daily customer_daily account_daily operations_daily transaction_risk_scores)  # M9D: score table
 C="$HOME/.secure/${PROJECT}"
 PHASE="${1:-}"
 case "$PHASE" in window|revoked) ;; *) echo "usage: bash $0 window|revoked" >&2; exit 2 ;; esac

@@ -10,8 +10,10 @@ Standard library only; offline; prints counts and verdicts only (the operator is
         operator's token-minting grant on the runner account; the 15 other resources no-op.
   iam   --phase window|revoked --capture DIR [--expiry EXP] --bootstrap-tfvars T
         A read-only capture by scripts/runner_window_collect.sh: the runner account policy,
-        the runner's own grants (unchanged), the loader/provisioner accounts (no grants), and
-        a live token-mint attempt (window: succeeds; revoked: PERMISSION_DENIED).
+        the runner's own grants (unchanged; R3: each of the 3 input, 4 mart and, since M9D,
+        the score table policies is exactly the runner's binding), the loader/provisioner
+        accounts (no grants), and a live token-mint attempt (window: succeeds; revoked:
+        PERMISSION_DENIED).
 
 Exit 0 = everything exactly as approved; 1 = problems; 2 = unreadable input.
 """
@@ -49,6 +51,8 @@ FORBIDDEN = ("allUsers", "allAuthenticatedUsers", "google_project_iam_binding",
 EXPIRY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 INPUTS = ("customers", "accounts", "curated_transactions")
 MARTS = ("transaction_daily", "customer_daily", "account_daily", "operations_daily")
+# M9D: the score table (pilot root, created at G2″); the runner holds the tables role on it.
+SCORES = ("transaction_risk_scores",)
 DENIED_RE = re.compile(r"PERMISSION_DENIED|iam\.serviceAccounts\.getAccessToken", re.I)
 
 
@@ -75,6 +79,17 @@ def condition(expiry: str) -> dict:
         raise InputError("main.tf no longer renders the reviewed runner condition")
     return {"title": f"runner-expires-{expiry.replace(':', '-')}", "description": description,
             "expression": f'request.time < timestamp("{expiry}")'}
+
+
+def score_tables() -> tuple[str, ...]:
+    """Re-derived from the M9C score contract and checked against the pilot root's text."""
+    contract = json.loads((REPO / "sql/scoring/v1/transaction_risk_scores.schema.json")
+                          .read_text())
+    text = (REPO / "infrastructure/terraform/main.tf").read_text()
+    if (contract.get("table"),) != SCORES or \
+            "{ (local.score_contract.table) = local.score_contract.fields }" not in text:
+        raise InputError("the pilot root no longer deploys the reviewed score table")
+    return SCORES
 
 
 def _true_leaves(node: object, path: tuple = ()) -> set[tuple] | None:
@@ -252,7 +267,7 @@ def verify_capture(capture: Path, phase: str, operator: str, expiry: str | None)
         found.append("project holds a token-creator or actAs role")
     check("R2 project policy unchanged", found)
     found = []
-    for table in (*INPUTS, *MARTS):
+    for table in (*INPUTS, *MARTS, *score_tables()):
         role = ROLES + ("readers" if table in INPUTS else "tables")
         policy = _bindings(_load(capture, f"table_{table}_policy.json"), table, found)
         if policy != [{"role": role, "members": [runner_member]}]:

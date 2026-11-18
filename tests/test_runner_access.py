@@ -303,7 +303,7 @@ def capture(tmp_path: Path, phase: str) -> Path:
     put("project_policy.json", {"version": 3, "etag": "e", "bindings": [
         {"role": "roles/owner", "members": ["user:owner@example.invalid"]},
         {"role": f"{R}jobs", "members": [RUNNER_MEMBER]}]})
-    for table in (*rwv.INPUTS, *rwv.MARTS):
+    for table in (*rwv.INPUTS, *rwv.MARTS, *rwv.SCORES):
         role = f"{R}{'readers' if table in rwv.INPUTS else 'tables'}"
         put(f"table_{table}_policy.json", {"version": 1, "etag": "e",
                                            "bindings": [{"role": role,
@@ -370,6 +370,24 @@ WINDOW_BAD = {
         "bindings"].append({"role": f"{R}tables", "members": [lpc.LOADER]})),
     "input table writable": _edit("table_customers_policy.json", lambda p: p["bindings"][
         0].update(role=f"{R}tables")),
+    # M9D: the score table policy must be exactly the runner's tables binding.
+    "score table policy missing the runner": _edit(
+        "table_transaction_risk_scores_policy.json", lambda p: p.update(bindings=[])),
+    "score table extra member": _edit("table_transaction_risk_scores_policy.json", lambda p: p[
+        "bindings"][0]["members"].append(f"serviceAccount:{bpc.PROVISIONER_EMAIL}")),
+    "score table extra binding": _edit("table_transaction_risk_scores_policy.json", lambda p: p[
+        "bindings"].append({"role": "roles/bigquery.dataViewer",
+                            "members": ["user:x@example.invalid"]})),
+    "score table reader role": _edit("table_transaction_risk_scores_policy.json", lambda p: p[
+        "bindings"][0].update(role=f"{R}readers")),
+    "score table editor role": _edit("table_transaction_risk_scores_policy.json", lambda p: p[
+        "bindings"][0].update(role="roles/bigquery.dataEditor")),
+    "score table conditional": _edit("table_transaction_risk_scores_policy.json", lambda p: p[
+        "bindings"][0].update(condition={"expression": "true", "title": "x"})),
+    "score table public": _edit("table_transaction_risk_scores_policy.json", lambda p: p[
+        "bindings"][0]["members"].append("allAuthenticatedUsers")),
+    "score table not a policy": _edit("table_transaction_risk_scores_policy.json",
+                                      lambda p: p.update(extra=1)),
     "runner has a key": _edit("runner_sa_keys.json", lambda k: k.update(keys=[{"name": "k"}])),
     "runner disabled": _edit("runner_sa.json", lambda a: a.update(disabled=True)),
     "loader regained access": _edit("loader_sa_policy.json", lambda p: p.update(bindings=[
@@ -408,6 +426,50 @@ def test_revoked_capture_adversarial(tmp_path, name):
 def test_window_capture_fails_as_revoked_and_vice_versa(tmp_path):
     assert not evaluate(capture(tmp_path, "window"), "revoked")["ok"]
     assert not evaluate(capture(tmp_path, "revoked"), "window")["ok"]
+
+
+SCORE_BAD = [n for n in WINDOW_BAD if n.startswith("score table")]
+
+
+@pytest.mark.parametrize("name", SCORE_BAD)
+def test_score_table_violations_fail_only_r3_in_both_phases(tmp_path, name):
+    for phase in ("window", "revoked"):
+        sub = tmp_path / f"{phase}-{SCORE_BAD.index(name)}"
+        sub.mkdir()
+        d = capture(sub, phase)
+        WINDOW_BAD[name](d)
+        report = evaluate(d, phase)
+        failed = sorted(k for k, v in report["checks"].items() if v == "FAIL")
+        assert failed == ["R3 runner table grants unchanged"], (name, phase, failed)
+        assert any("transaction_risk_scores" in p for p in report["problems"]), name
+
+
+def test_r3_covers_the_seven_tables_and_the_score_table(tmp_path):
+    assert rwv.INPUTS == ("customers", "accounts", "curated_transactions")
+    assert rwv.MARTS == ("transaction_daily", "customer_daily", "account_daily",
+                         "operations_daily")
+    assert rwv.score_tables() == rwv.SCORES == ("transaction_risk_scores",)
+    d = capture(tmp_path, "revoked")
+    assert evaluate(d, "revoked")["ok"]
+    policy = json.loads((d / "table_transaction_risk_scores_policy.json").read_text())
+    assert policy["bindings"] == [{"role": f"{R}tables", "members": [RUNNER_MEMBER]}]
+    collector = (ROOT / "scripts/runner_window_collect.sh").read_text()
+    tables = re.search(r"^TABLES=\(([^)]*)\)", collector, re.M).group(1).split()
+    assert tables == [*rwv.INPUTS, *rwv.MARTS, *rwv.SCORES]
+
+
+def test_capture_without_the_score_table_fails_closed(tmp_path):
+    """A pre-M9D capture (seven tables only) can no longer pass R3."""
+    d = capture(tmp_path, "revoked")
+    (d / "table_transaction_risk_scores_policy.json").unlink()
+    with pytest.raises(rwv.InputError):
+        evaluate(d, "revoked")
+
+
+def test_score_table_is_rederived_from_the_contract(monkeypatch):
+    monkeypatch.setattr(rwv, "SCORES", ("transaction_scores",))
+    with pytest.raises(rwv.InputError):
+        rwv.score_tables()
 
 
 def test_missing_capture_file_fails_closed(tmp_path):
