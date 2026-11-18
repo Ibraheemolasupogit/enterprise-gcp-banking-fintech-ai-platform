@@ -75,22 +75,14 @@ REQUIRED_DIAGRAMS = [
 ]
 
 README_REQUIRED_SECTIONS = [
-    "Problem Statement",
-    "Why This Project Matters",
-    "Key Capabilities",
-    "Architecture Overview",
-    "GCP Service Mapping Summary",
-    "Local Quickstart",
-    "End-to-End Demo",
-    "Sample Outputs",
-    "Model Governance and Controls",
-    "Repository Structure",
-    "Milestone Summary",
-    "Portfolio Positioning",
-    "Synthetic Data Disclaimer",
-    "Non-Production Disclaimer",
-    "Limitations",
-    "Future Enhancements",
+    "Problem",
+    "System Overview",
+    "Capabilities",
+    "Verified GCP Pilot Results",
+    "Quickstart",
+    "Repository Layout",
+    "Documentation",
+    "Limitations and Status",
 ]
 
 DOCUMENTED_COMMANDS = [
