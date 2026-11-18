@@ -127,3 +127,18 @@ M9B explains the frozen M9A logistic-regression champion without retraining it:
 - **Governance:** a model card and a champion/challenger decision record, both generated from the run evidence.
 
 See [M9B validation](upgrade/m9b_validation.md).
+
+## M9C portable model and SQL scoring
+
+```bash
+python3 -m financial_crime_ml.cli export-fraud-model --m9a-run outputs/runs/<m9a> \
+  --m9b-run outputs/runs/<m9b> --run-id <id>
+```
+
+M9C exports the frozen champion as a hashed, canonical specification and generates GoogleSQL scoring from it:
+- strictly past-only features;
+- INT64 parts-per-million scores;
+- reason codes;
+- a transactional refresh and a read-only preflight.
+
+The same builder's SQLite rendering is checked against the Python reference on every row, with exact integer, alert and reason-code parity. A label-free monitoring reference profile with PSI is included. The deployable specification is v2 (`m9c-spec-2.0.0`, approved Option B), which alerts on the integer rule `score_ppm >= 463905`. Its approval is limited to offline development and preparing the synthetic pilot; production approval is pending. See [M9C validation](upgrade/m9c_validation.md); GoogleSQL execution belongs to gated M9D.

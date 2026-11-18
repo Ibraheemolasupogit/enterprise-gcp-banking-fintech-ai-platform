@@ -54,6 +54,19 @@ def main(argv: list[str] | None = None) -> None:
         verify_main(args[1:])
         return
 
+    if args and args[0] in {"render-scoring-bundle", "verify-scoring-evidence"}:
+        from financial_crime_ml.deployment import scoring_bundle
+
+        (scoring_bundle.render_main if args[0] == "render-scoring-bundle"
+         else scoring_bundle.verify_main)(args[1:])
+        return
+
+    if args and args[0] == "export-fraud-model":
+        from financial_crime_ml.deployment.m9c_workflow import export_main
+
+        export_main(args[1:])
+        return
+
     if args and args[0] == "explain-fraud-v2":
         from financial_crime_ml.governance.m9b_workflow import explain_main
 

@@ -31,9 +31,12 @@ locals {
   }
   source_schemas = jsondecode(file("${path.module}/../schemas/v1/source_tables.json"))
   mart_contract  = jsondecode(file("${path.module}/../../sql/analytics/v1/bigquery.schemas.json"))
+  # M9D: the score table (M9C contract). Runner access comes from the module's existing
+  # table_role grant (get/getData/updateData); no new permission or role.
+  score_contract = jsondecode(file("${path.module}/../../sql/scoring/v1/transaction_risk_scores.schema.json"))
   schemas = merge(local.source_schemas, {
     for name, value in local.mart_contract.tables : name => value.fields
-  })
+  }, { (local.score_contract.table) = local.score_contract.fields })
   # Single source of truth shared with the separately governed bootstrap root (M6K, ADR-003).
   runtime_roles           = jsondecode(file("${path.module}/../iam/runtime_roles.json"))
   provisioner_permissions = jsondecode(file("${path.module}/../iam/provisioner.role.json")).includedPermissions

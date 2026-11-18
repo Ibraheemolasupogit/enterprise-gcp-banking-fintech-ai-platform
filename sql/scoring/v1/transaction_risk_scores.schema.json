@@ -1,0 +1,15 @@
+{
+  "contract": "M9C score table; one row per curated_transactions row, replaced in full per scoring run",
+  "status": "proposed_not_cloud_tested",
+  "table": "transaction_risk_scores",
+  "fields": [
+    {"name": "transaction_id", "type": "STRING", "mode": "REQUIRED"},
+    {"name": "model_spec_sha256", "type": "STRING", "mode": "REQUIRED"},
+    {"name": "input_valid", "type": "INT64", "mode": "REQUIRED"},
+    {"name": "score_ppm", "type": "INT64", "mode": "NULLABLE"},
+    {"name": "alert", "type": "INT64", "mode": "NULLABLE"},
+    {"name": "reason_code_1", "type": "STRING", "mode": "NULLABLE"},
+    {"name": "reason_code_2", "type": "STRING", "mode": "NULLABLE"},
+    {"name": "reason_code_3", "type": "STRING", "mode": "NULLABLE"}
+  ]
+}

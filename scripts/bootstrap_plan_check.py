@@ -71,6 +71,13 @@ Pilot root modes (both require --dataset-owner=user:<approved owner>; M6T):
                   on an input table: num_rows 0 -> packet rows, num_bytes 0 -> packet logical
                   bytes, with etag and last_modified_time (forward, not after the plan) moving
                   together. Schema, labels, protection, IAM or anything else: rejected.
+                  Superseded for A10 after M8 (the marts are now loaded): use pilot-scores.
+  pilot-scores    M9D (and the overdue A10): the 18 resources unchanged; exactly 2 creates,
+                  the score table transaction_risk_scores (deletion-protected, exact M9C
+                  schema) and its runner member (bankpilot_dev_tables, no condition).
+                  Requires --packet-dir and --expected-manifest-sha256. Refresh drift is
+                  accepted only as exact loads: the three inputs to the packet's rows/bytes
+                  (as pilot-loaded) and the four marts to the M8-verified rows/bytes.
 
 Exit 0 when ok, 1 when the plan has problems, 2 when the input cannot be parsed.
 
@@ -124,7 +131,8 @@ LOADER_MODES = ("loader-identity", "loader-access", "loader-revoke", "loader-rec
                 "loader-revoke-partial")
 RUNNER_MODES = ("runner-access", "runner-revoke")
 BOOTSTRAP_MODES = (*M6_BOOTSTRAP_MODES, *LOADER_MODES, *RUNNER_MODES)
-PILOT_MODES = ("pilot", "pilot-recovery", "pilot-loaded")
+PILOT_MODES = ("pilot", "pilot-recovery", "pilot-loaded", "pilot-scores")
+LOADED_MODES = ("pilot-loaded", "pilot-scores")
 MODES = (*BOOTSTRAP_MODES, *PILOT_MODES)
 # ---- M7C1 dedicated loader ----
 LOADER_EMAIL = f"{PREFIX}-{ENVIRONMENT}-loader@{PROJECT}.iam.gserviceaccount.com"
@@ -194,6 +202,35 @@ def durable_addresses(iam: Path = IAM) -> set[str]:
         "google_project_iam_custom_role.impersonate",
         "google_project_iam_member.runner_jobs",
     }
+
+
+SCORE_TABLE = "transaction_risk_scores"
+SCORE_SCHEMA = REPO / "sql" / "scoring" / "v1" / "transaction_risk_scores.schema.json"
+SCORE_ADDRESSES = frozenset({
+    f'module.bigquery.google_bigquery_table.products["{SCORE_TABLE}"]',
+    f'module.bigquery.google_bigquery_table_iam_member.runner["{SCORE_TABLE}"]'})
+MART_TABLES = frozenset({"transaction_daily", "customer_daily", "account_daily",
+                         "operations_daily"})
+TYPE_NAMES = {"INT64": {"INT64", "INTEGER"}, "STRING": {"STRING"}}
+
+
+def score_schema_fields() -> list[dict]:
+    return json.loads(SCORE_SCHEMA.read_text())["fields"]
+
+
+def score_schema_ok(schema: object) -> bool:
+    """The planned score-table schema equals the M9C contract (names, types, modes, order)."""
+    try:
+        fields = json.loads(schema) if isinstance(schema, str) else None
+    except ValueError:
+        return False
+    want = score_schema_fields()
+    if not isinstance(fields, list) or len(fields) != len(want):
+        return False
+    return all(isinstance(g, dict) and set(g) <= {"name", "type", "mode", "description"}
+               and g.get("name") == w["name"] and g.get("mode") == w["mode"]
+               and g.get("type") in TYPE_NAMES[w["type"]] for g, w in zip(fields, want,
+                                                                          strict=True))
 
 
 def pilot_tables() -> list[str]:
@@ -814,7 +851,9 @@ def _policy_is_runner_only(policy_data: object, role: str) -> bool:
                                        "members": [f"serviceAccount:{RUNNER_EMAIL}"]}]
 
 
-def _check_pilot_values(rc: dict, problems: list[str], owner: object = None) -> None:
+def _check_pilot_values(rc: dict, problems: list[str], owner: object = None,
+                        tables: list[str] | None = None) -> None:
+    tables = pilot_tables() if tables is None else tables
     addr, kind, after = rc["address"], rc["type"], rc["change"].get("after") or {}
     dataset = f"{PREFIX}_{ENVIRONMENT}"
     if after.get("project") not in (None, PROJECT):
@@ -852,7 +891,7 @@ def _check_pilot_values(rc: dict, problems: list[str], owner: object = None) -> 
                            r'\["([a-z_]+)"\]', addr)
         table = key.group(1) if key else None
         approved_ids = {table, f"projects/{PROJECT}/datasets/{dataset}/tables/{table}"}
-        if table not in pilot_tables() or after.get("table_id") not in approved_ids:
+        if table not in tables or after.get("table_id") not in approved_ids:
             problems.append(f"{addr}: table_id is not the approved table")
         if after.get("dataset_id") not in (None, dataset):
             problems.append(f"{addr}: table member is not in {dataset}")
@@ -974,11 +1013,13 @@ def _table_address(table: str) -> str:
     return f'module.bigquery.google_bigquery_table.products["{table}"]'
 
 
-def loaded_expectation_problems(loaded: object) -> list[str]:
-    """The packet-derived expectation: exactly the three input tables, positive integers."""
+def loaded_expectation_problems(loaded: object, mode: str = "pilot-loaded") -> list[str]:
+    """pilot-loaded: exactly the three input tables (packet-derived). pilot-scores: those and
+    the four marts (M8-verified); every value a positive integer."""
+    want = READER_TABLES if mode == "pilot-loaded" else READER_TABLES | MART_TABLES
     tables = loaded.get("tables") if isinstance(loaded, dict) else None
-    if not isinstance(tables, dict) or set(tables) != READER_TABLES:
-        return ["loaded table expectation must cover exactly the three input tables"]
+    if not isinstance(tables, dict) or set(tables) != want:
+        return [f"loaded table expectation must cover exactly {sorted(want)}"]
     for table, spec in tables.items():
         if not isinstance(spec, dict) or set(spec) != {"num_rows", "num_bytes"} or not all(
                 type(spec[k]) is int and spec[k] > 0 for k in spec):
@@ -1030,7 +1071,7 @@ def loaded_drift_problems(rc: dict, planned: datetime | None, spec: dict) -> lis
 
 def _check_loaded_sizes(rc: dict, loaded: dict, problems: list[str]) -> None:
     """Every table's refreshed size: inputs exactly the packet, marts empty."""
-    if rc.get("type") != "google_bigquery_table":
+    if rc.get("type") != "google_bigquery_table" or rc["change"]["actions"] != ["no-op"]:
         return
     addr = rc["address"]
     values = rc["change"].get("before") or {}
@@ -1057,10 +1098,11 @@ def _check_pilot(plan: dict, mode: str = "pilot", owner: object = None,
     accepted_metadata_drift: list[str] = []
     seen: set[str] = set()
     planned = _parse_utc(plan.get("timestamp"))
-    load_problems = loaded_expectation_problems(loaded) if mode == "pilot-loaded" else []
+    load_problems = loaded_expectation_problems(loaded, mode) if mode in LOADED_MODES else []
     problems.extend(load_problems)
-    loaded_addresses = ({_table_address(t): t for t in READER_TABLES}
-                        if mode == "pilot-loaded" and not load_problems else {})
+    loaded_tables_map: dict = (loaded.get("tables") or {}) if isinstance(loaded, dict) else {}
+    loaded_addresses = ({_table_address(t): t for t in loaded_tables_map}
+                        if mode in LOADED_MODES and not load_problems else {})
     accepted_load_drift: list[str] = []
     for rc in plan.get("resource_drift") or []:
         addr = rc.get("address")
@@ -1079,16 +1121,26 @@ def _check_pilot(plan: dict, mode: str = "pilot", owner: object = None,
                 accepted_metadata_drift.append(addr)
         else:
             problems.append(f"drift detected outside Terraform: {addr}")
+    tables = pilot_tables() + ([SCORE_TABLE] if mode == "pilot-scores" else [])
+
     def check(rc: dict) -> None:
-        _check_pilot_values(rc, problems, owner)
-        if mode == "pilot-loaded" and not load_problems:
+        _check_pilot_values(rc, problems, owner, tables)
+        if mode in LOADED_MODES and not load_problems:
             _check_loaded_sizes(rc, loaded, problems)
+        if mode == "pilot-scores" and rc.get("address") in SCORE_ADDRESSES and \
+                rc.get("type") == "google_bigquery_table":
+            after = rc["change"].get("after") or {}
+            if after.get("table_id") != SCORE_TABLE or not score_schema_ok(after.get("schema")):
+                problems.append(f"{rc['address']}: score table id or schema differs from "
+                                "the M9C contract")
 
     report = _classify(plan, problems, check)
     if mode == "pilot":
         _compare(report, pilot_addresses(), set(), set(), problems)
     elif mode == "pilot-loaded":
         _compare(report, set(), pilot_addresses(), set(), problems)
+    elif mode == "pilot-scores":
+        _compare(report, set(SCORE_ADDRESSES), pilot_addresses(), set(), problems)
     else:
         _compare(report, {DATASET_POLICY}, pilot_addresses() - {DATASET_POLICY}, set(),
                  problems)
@@ -1097,7 +1149,7 @@ def _check_pilot(plan: dict, mode: str = "pilot", owner: object = None,
     _forbid(plan, PILOT_FORBIDDEN, problems, PILOT_SCAN_KEYS)
     if mode == "pilot-recovery":
         report["accepted_metadata_drift"] = sorted(accepted_metadata_drift)
-    if mode == "pilot-loaded":
+    if mode in LOADED_MODES:
         report["accepted_load_drift"] = sorted(accepted_load_drift)
         report["packet_id"] = loaded.get("packet_id") if isinstance(loaded, dict) else None
     report.update(mode=mode, dataset_owner_approved=not dataset_owner_problems(owner),
@@ -1115,16 +1167,26 @@ def check_plan(plan: dict, mode: str, iam: Path = IAM, dataset_owner: object = N
     return _check_bootstrap(plan, mode, iam, packet_id, bucket)
 
 
-def loaded_tables(packet_dir: object, manifest_sha256: object) -> dict:
-    """Verify the packet (M7B verifier) and derive the exact post-load table sizes."""
+def loaded_tables(packet_dir: object, manifest_sha256: object,
+                  mode: str = "pilot-loaded") -> dict:
+    """Verify the packet (M7B verifier) and derive the exact post-load table sizes; for
+    pilot-scores also the four marts' M8-verified rows and logical bytes."""
     if packet_dir is None or manifest_sha256 is None:
-        raise ValueError("pilot-loaded requires --packet-dir and --expected-manifest-sha256")
+        raise ValueError(f"{mode} requires --packet-dir and --expected-manifest-sha256")
     source = str(REPO / "src")
     if source not in sys.path:
         sys.path.insert(0, source)
     from financial_crime_ml.deployment.ingestion_bundle import loaded_table_expectations
 
-    return loaded_table_expectations(Path(packet_dir), str(manifest_sha256))
+    loaded = loaded_table_expectations(Path(packet_dir), str(manifest_sha256))
+    if mode == "pilot-scores":
+        from financial_crime_ml.deployment.marts_bundle import expected_marts
+
+        marts = expected_marts(Path(str(packet_dir)), str(manifest_sha256))["marts"]
+        loaded["tables"].update({name: {"num_rows": spec["row_count"],
+                                        "num_bytes": spec["logical_bytes"]}
+                                 for name, spec in marts.items()})
+    return loaded
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1143,15 +1205,15 @@ def main(argv: list[str] | None = None) -> int:
                         help="pilot-loaded: the approved packet manifest SHA-256")
     args = parser.parse_args(argv)
     loaded = None
-    if args.mode == "pilot-loaded":
+    if args.mode in LOADED_MODES:
         try:
-            loaded = loaded_tables(args.packet_dir, args.expected_manifest_sha256)
+            loaded = loaded_tables(args.packet_dir, args.expected_manifest_sha256, args.mode)
         except (ValueError, OSError, KeyError, TypeError, ImportError) as exc:
             print(json.dumps({"ok": False, "problems": [f"packet not verified: {exc}"]}))
             return 2
     elif args.packet_dir is not None or args.expected_manifest_sha256 is not None:
         print(json.dumps({"ok": False, "problems": [
-            "--packet-dir/--expected-manifest-sha256 apply only to pilot-loaded"]}))
+            "--packet-dir/--expected-manifest-sha256 apply only to pilot-loaded/-scores"]}))
         return 2
     try:
         plan = json.load(sys.stdin)

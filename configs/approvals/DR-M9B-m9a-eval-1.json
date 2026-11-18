@@ -1,0 +1,27 @@
+{
+  "decision_record_id": "DR-M9B-m9a-eval-1",
+  "decision_record_sha256": "916a9e48cdf06d8dd9d97709135e05336455f3eccc667771b3bee9a6e36edccf",
+  "selection_sha256": "846f40a79b9500a3d685578b0cdb0480ed6fd197e340029820409fdb6c91169f",
+  "decision": "logistic_regression",
+  "approved_on": "2026-11-18",
+  "approved_by": "repository owner (operator); identity recorded outside the repository",
+  "status": "approved_limited",
+  "scope": [
+    "offline development of the fraud-v2 champion and its portable scoring",
+    "preparation of the controlled synthetic-data GCP pilot (M9D), subject to its own gates"
+  ],
+  "not_approved": [
+    "production use or any real customer, account or payment data",
+    "operational alerting, blocking or regulatory reporting",
+    "executing M9D cloud steps without their separate window approvals"
+  ],
+  "production_approval": "pending",
+  "deployment_policy_change": {
+    "option": "B",
+    "rule": "alert if score_ppm >= 463905 (INT64 comparison)",
+    "replaces": "alert if probability >= 0.4639053232165378 (FLOAT64 comparison)",
+    "threshold_ppm": 463905,
+    "spec_version": "m9c-spec-2.0.0",
+    "reason": "engine-robust integer decision; matches the M9A champion's alerts on all 20,000 rows, including the threshold-defining row that a one-ulp probability difference flips under the FLOAT64 rule"
+  }
+}
