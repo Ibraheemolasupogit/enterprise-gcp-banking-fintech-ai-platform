@@ -2,7 +2,7 @@
 
 Prepared offline on 2026-11-18. The operator runs every step by hand in Terminal.app, never in Claude Code.
 
-**Status (2026-11-18):** G0 passed at `dd33113`, and G1 was applied. **G2 was a NO-GO, and the pilot plan was not applied.** G3 revoked the provisioner (8/8 PASS). Recovery runs through G0′ → G1′ → G2′ → G3′ (§2a). M9D:
+**Status (2026-11-18):** G0 passed at `dd33113`, and G1 was applied. **G2 was a NO-GO, and the pilot plan was not applied.** G3 revoked the provisioner (8/8 PASS). Recovery runs through G0′ → G1′ → G2′ → G3′ (§2a). **G2′ was not applied either:** its independent verification wrongly expected no output changes. G3′ revoked the provisioner (8/8 PASS), and the expectation is corrected under G0″ (§2b). M9D:
 1. creates the score table;
 2. completes the overdue M7D A10 check, inside **one provisioner window**;
 3. scores the 4,000-row M7B pilot packet with model spec v2 (`38180198…39e0`), as the runner, inside **one runner window**;
@@ -116,6 +116,51 @@ G2′ requirements:
 - The checker result alone is not enough: the independent verification must agree with it.
 - Re-check the SHA-256 immediately before apply. A mismatch, or any re-plan, needs a new G2′ approval.
 
+## 2b. G2′ not applied (2026-11-18): corrected output expectation (G0″)
+
+### What happened
+
+| Step | Result |
+|---|---|
+| G0′ | `f432a21`, Python CI run 44290927173 successful |
+| G1′ | Provisioner access window opened |
+| G2′ | The strict `pilot-scores` checker passed. The independent verification printed `output changes: ['inventory']` instead of the documented `[]`, so the checker and the verification disagreed. **Not applied** |
+| G3′ | Provisioner revoked; read back 8/8 PASS |
+
+### Preserved G2′ evidence (custody `plans/pilot-dev/`; never apply, edit or delete)
+
+| File | SHA-256 |
+|---|---|
+| `20261118T111922Z-pilot-scores-f432a21.tfplan` | `090dd3fe2f5b024a066cac40a3da2e5f2c968ee7ad17ffcc1d2313b79ec2edda` |
+| `20261118T111922Z-pilot-scores-f432a21.json` | `a4c7e0bdeb805387961c483a463c721124b830c150de651de3ccaec18e447ca8` |
+
+### Read-only review of the output change
+
+The bucket was compared as a true/false match only and never printed.
+
+**The expectation was wrong, not the plan.** `inventory.tables` is `sort(keys(local.schemas))` (`infrastructure/terraform/main.tf`), and M9D (`dd33113`) merged the score contract into `local.schemas`. The output therefore has to gain exactly `transaction_risk_scores`. The original G2 plan contains the identical change. The checker does not validate outputs (it only scans them for forbidden text), so the independent verification is the only check on outputs.
+
+The review of the G2′ JSON found:
+- `output_changes` holds only `inventory`, with action `["update"]`.
+- The same 10 keys appear before and after. Only `tables` changed.
+- The 7 existing tables are unchanged and in order, and `transaction_risk_scores` is added as the 8th, sorted. Nothing was removed.
+- The bucket and every other field are identical.
+- `after_unknown` is false, and the output is not sensitive.
+- `planned_values` equals `after`. `errored` is false, and the plan is applyable and complete.
+
+**Why `prior_state` differs from `output_changes.before`:**
+- `output_changes.before` is the value stored in state (7 tables) and is the correct comparison.
+- `prior_state` is the refreshed state, and Terraform re-evaluates root outputs against the current configuration during the plan. So the `inventory` in `prior_state` already lists 8 tables.
+- This is normal Terraform behaviour, not drift. Never use `prior_state` outputs as the "before" value.
+
+### Correction and next steps
+
+§3 step 2 now requires exactly this one `inventory` update and checks it without printing values. The G2′ plan was not approved under the corrected text and is never applied.
+
+Next steps:
+- **G0″:** this documentation-only commit, with CI green and a clean tree.
+- Then a new provisioner window, a new SHA-pinned pilot plan with fresh approval, and revocation, under the same rules as G1′/G2′/G3′ (§2a), with **both** checks passing.
+
 ## 3. Commands (Terminal.app; `C="$HOME/.secure/ebank-pilot-dev-261031-k7m4"`)
 
 Token forms are exactly as in M6P/M6S: the operator token is fetched inside `env -i … /bin/sh -c` for `plan` and `apply` only, and never appears in argv.
@@ -176,12 +221,26 @@ for r in rc:
 for r in p.get("resource_drift") or []:
     print("DRIFT ", r["change"]["actions"], r["address"])
 print("data sources:", sum(r.get("mode", "managed") != "managed" for r in rc))
-print("output changes:", [k for k, v in (p.get("output_changes") or {}).items()
-                          if v.get("actions") != ["no-op"]])
+oc = p.get("output_changes") or {}
+print("output changes:", sorted(k for k, v in oc.items() if v.get("actions") != ["no-op"]))
+# inventory.tables = sort(keys(local.schemas)) (main.tf), so adding the score contract
+# must add exactly that one table. Compared, never printed (the output holds the bucket).
+inv = oc.get("inventory") or {}; b, a = inv.get("before") or {}, inv.get("after") or {}
+old = ["account_daily", "accounts", "curated_transactions", "customer_daily", "customers",
+       "operations_daily", "transaction_daily"]
+print("inventory change is exactly +transaction_risk_scores:",
+      set(oc) == {"inventory"} and inv.get("actions") == ["update"]
+      and set(b) == set(a) and sorted(k for k in a if a[k] != b.get(k)) == ["tables"]
+      and b.get("tables") == old and a.get("tables") == sorted(old + ["transaction_risk_scores"])
+      and not inv.get("after_unknown") and not inv.get("before_sensitive")
+      and not inv.get("after_sensitive"))
 PY
 #   expect: errored False; actions {'no-op': 18, 'create': 2}; exactly the 2 CHANGE creates;
 #   at most 11 DRIFT ['update'] lines, only on the 7 tables, the dataset and the 3 input
-#   runner members (any other address or action: stop); data sources 0; output changes [].
+#   runner members (any other address or action: stop); data sources 0;
+#   output changes ['inventory']; inventory change is exactly +transaction_risk_scores: True
+#   (the 7 tables unchanged, transaction_risk_scores added as the 8th, every other inventory
+#   field identical, no unknown or sensitive values). Anything else: stop (§2b).
 shasum -a 256 "$Q"                                   # the G2′ pinned value; re-check before apply
 tfrun pilot-dev apply "$Q"                                                      # after G2′
 python3 scripts/state_backup.py create --root pilot-dev      # then upload + verify-download
