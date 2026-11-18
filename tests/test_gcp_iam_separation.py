@@ -150,6 +150,8 @@ def test_bootstrap_inventory_is_additive_and_bounded():
         ("google_project_iam_member", "loader_objects"),
         ("google_bigquery_table_iam_member", "loader"),
         ("google_service_account_iam_member", "operator_loader_impersonation"),
+        # M8: operator token minting on the runner account; gated off by default.
+        ("google_service_account_iam_member", "operator_runner_impersonation"),
     ]
     for forbidden in ("google_project_iam_policy", "google_project_iam_binding",
                       "google_service_account_key", "google_project_service",
@@ -304,7 +306,8 @@ def test_loader_variables_validate_expiry_overlap_bucket_and_prefix():
     variables = (BOOTSTRAP / "variables.tf").read_text()
     assert ("!var.loader_access_enabled || (var.loader_identity_enabled && "
             "!var.provisioner_access_enabled)") in variables
-    assert variables.count('timeadd(plantimestamp(), "8h")') == 2  # provisioner and loader
+    # provisioner, loader and (M8) runner windows
+    assert variables.count('timeadd(plantimestamp(), "8h")') == 3
     assert 'timecmp(var.loader_access_expiry, plantimestamp()) > 0' in variables
     assert '"^m7/ingestion/m7p-[0-9a-f]{24}/$"' in variables
     assert '"^[a-z][a-z0-9-]{6,61}[a-z0-9]$", var.loader_bucket_name' in variables

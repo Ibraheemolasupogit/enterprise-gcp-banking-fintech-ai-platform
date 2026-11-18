@@ -44,7 +44,7 @@ Capture resource IDs, effective IAM (including inheritance), schema exports and 
 
 **Rewritten in M7C2 (2026-11-13).** Gate C now has two parts:
 - **C-inputs (M7):** load the three input tables. Prepared offline; it runs only as M7D, under the [M7D runbook](upgrade/m7d_runbook.md).
-- **C-marts (M8):** build the four marts. Not prepared; **not authorised**.
+- **C-marts (M8):** build the four marts. Prepared offline ([M8 runbook](upgrade/m8_runbook.md)); **not authorised**; it needs an approved runner access window (§1 of the runbook).
 
 The earlier text named the provisioner as uploader and loader. That contradicted its M6K role, which has no data or job permissions, and has been removed (gap G7).
 
@@ -96,9 +96,9 @@ The earlier text named the provisioner as uploader and loader. That contradicted
 
 **Stop rules:** stop on any permission error, unexpected value or extra job. Never widen a role, retry with different settings, or delete inside the window. A wrong but successful load is recovered only by a separately reviewed operation (M7A G9).
 
-### C-marts: mart processing (M8; not prepared, not authorised)
+### C-marts: mart processing (M8; prepared offline, not authorised)
 
-The following design is retained for M8 and needs its own review, identity decision and approvals. **The runner**, not the loader or provisioner, would execute it after all loader access is revoked.
+**M8 (2026-11-17):** implemented and tested offline ([M8 runbook](upgrade/m8_runbook.md)). Runner access is a separate, off-by-default, expiring operator-to-runner token-minting window in the bootstrap root, with its own checker modes, an independent verifier and live denial checks. Not executed or authorised. The design below is retained and still needs its own review and approvals. **The runner**, not the loader or provisioner, would execute it after all loader access is revoked.
 
 - **Rendering and validation:** render only the approved project/dataset identifiers into `marts.v1.insert.proposed.sql` (identifiers cannot be query parameters). Validate and estimate the four SELECT bodies individually before DML, because script dry runs have limitations. Require exact expected fields and grains, with no approximation.
 - **Byte and job ledger:**

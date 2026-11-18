@@ -54,6 +54,14 @@ def main(argv: list[str] | None = None) -> None:
         verify_main(args[1:])
         return
 
+    if args and args[0] in {"render-mart-bundle", "verify-mart-evidence", "mart-expectations"}:
+        from financial_crime_ml.deployment import marts_bundle
+
+        {"render-mart-bundle": marts_bundle.render_main,
+         "verify-mart-evidence": marts_bundle.verify_main,
+         "mart-expectations": marts_bundle.expected_main}[args[0]](args[1:])
+        return
+
     if args and args[0] == "ingest-financial-data":
         from financial_crime_ml.ingestion.foundation.cli import ingestion_main
 

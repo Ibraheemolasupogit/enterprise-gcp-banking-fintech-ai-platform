@@ -262,6 +262,30 @@ resource "google_service_account_iam_member" "operator_loader_impersonation" {
   }
 }
 
+# M8: token minting on the runner account resource only, for the same single named operator,
+# expiring at runner_access_expiry. Off by default. It changes nothing the runner itself holds
+# (its project, dataset, bucket and table bindings are untouched); revoke by setting it false.
+locals {
+  runner_access_count = var.runner_access_enabled ? 1 : 0
+  runner_expiry_condition = {
+    title       = "runner-expires-${replace(coalesce(var.runner_access_expiry, "unset"), ":", "-")}"
+    description = "M8 time-bound runner token minting; revoke explicitly after use"
+    expression  = "request.time < timestamp(\"${coalesce(var.runner_access_expiry, "1970-01-01T00:00:00Z")}\")"
+  }
+}
+
+resource "google_service_account_iam_member" "operator_runner_impersonation" {
+  count              = local.runner_access_count
+  service_account_id = google_service_account.runner.name
+  role               = google_project_iam_custom_role.impersonate.name
+  member             = var.operator_member
+  condition {
+    title       = local.runner_expiry_condition.title
+    description = local.runner_expiry_condition.description
+    expression  = local.runner_expiry_condition.expression
+  }
+}
+
 output "bootstrap_inventory" {
   value = {
     runner_email      = google_service_account.runner.email

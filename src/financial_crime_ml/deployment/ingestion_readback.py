@@ -16,7 +16,7 @@ from __future__ import annotations
 import csv
 import io
 import re
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 from financial_crime_ml.deployment.ingestion_evidence import DECIMAL_RE
 from financial_crime_ml.deployment.ingestion_packet import EXPECTED_FIELDS, TABLES
@@ -61,6 +61,13 @@ def convert_value(cell: object, field: dict) -> str:
         return value
     if field["type"] == "TIMESTAMP":
         return timestamp_from_micros(value)
+    if field["type"] == "DATE":  # M8 marts: tabledata.list returns a canonical civil date
+        try:
+            if date.fromisoformat(value).isoformat() != value:
+                raise ValueError
+        except ValueError:
+            raise ReadbackError(f"{field['name']}: DATE is not YYYY-MM-DD") from None
+        return value
     raise ReadbackError(f"{field['name']}: unsupported type {field['type']}")
 
 

@@ -48,6 +48,15 @@ M7C1 loader modes (bootstrap root; provisioner access must stay disabled):
                    all six are still recorded is a normal revocation and must use the strict
                    loader-revoke mode. Live IAM read-back afterwards is mandatory.
 
+M8 runner modes (bootstrap root; provisioner and loader access must stay disabled):
+  runner-access    The 15 resources unchanged; exactly 1 create: the named operator's
+                   token-minting grant (bankpilot_dev_impersonate) on the runner account
+                   resource, with the exact approved runner_access_expiry (<= 8 h). Nothing the
+                   runner itself holds changes.
+  runner-revoke    Runner access disabled; the 15 resources unchanged and that grant deleted
+                   (or already removed outside Terraform). Every other mode rejects the grant
+                   and requires the runner variables, when present, to be off/null.
+
 Pilot root modes (both require --dataset-owner=user:<approved owner>; M6T):
   pilot           First pilot deployment: exactly 18 creates (bucket, dataset, 7 tables, two
                   resource-level policies and 7 table members). The bucket and table grants
@@ -113,7 +122,8 @@ READER_TABLES = {"curated_transactions", "customers", "accounts"}
 M6_BOOTSTRAP_MODES = ("initial", "recovery", "access", "revoke")
 LOADER_MODES = ("loader-identity", "loader-access", "loader-revoke", "loader-recovery",
                 "loader-revoke-partial")
-BOOTSTRAP_MODES = (*M6_BOOTSTRAP_MODES, *LOADER_MODES)
+RUNNER_MODES = ("runner-access", "runner-revoke")
+BOOTSTRAP_MODES = (*M6_BOOTSTRAP_MODES, *LOADER_MODES, *RUNNER_MODES)
 PILOT_MODES = ("pilot", "pilot-recovery", "pilot-loaded")
 MODES = (*BOOTSTRAP_MODES, *PILOT_MODES)
 # ---- M7C1 dedicated loader ----
@@ -138,6 +148,9 @@ PARTIAL_GRANTS = {"loader-recovery": LOADER_EXPIRING_GRANTS,
                   "loader-revoke-partial": LOADER_GRANTS}
 LOADER_OFF = {"loader_access_enabled": False, "loader_access_expiry": None,
               "loader_bucket_name": None, "loader_object_prefix": None}
+# ---- M8 temporary runner token minting (operator -> runner account resource only) ----
+RUNNER_IMPERSONATION = "google_service_account_iam_member.operator_runner_impersonation[0]"
+RUNNER_OFF = {"runner_access_enabled": False, "runner_access_expiry": None}
 PACKET_ID_RE = re.compile(r"^m7p-[0-9a-f]{24}$")
 BUCKET_RE = re.compile(r"^[a-z][a-z0-9-]{6,61}[a-z0-9]$")
 DATASET_POLICY = "module.bigquery.google_bigquery_dataset_iam_policy.metadata"
@@ -221,6 +234,13 @@ def loader_object_condition(expiry: str, bucket: str, prefix: str) -> dict:
             "expression": (f'request.time < timestamp("{expiry}") && resource.type == '
                            f'"storage.googleapis.com/Object" && resource.name.startsWith('
                            f'"projects/_/buckets/{bucket}/objects/{prefix}")')}
+
+
+def runner_expiry_condition(expiry: str) -> dict:
+    """The exact condition the bootstrap root renders on the M8 runner token-minting grant."""
+    return {"title": f"runner-expires-{expiry.replace(':', '-')}",
+            "description": "M8 time-bound runner token minting; revoke explicitly after use",
+            "expression": f'request.time < timestamp("{expiry}")'}
 
 
 def _loader_condition_shape_ok(values: dict, title_prefix: str) -> bool:
@@ -320,6 +340,25 @@ def _check_values(rc: dict, roles: dict[str, set[str]], problems: list[str],
                 ctx.get("operator") is not None and member != ctx["operator"]):
             problems.append(f"{addr}: member is not the single named operator")
         _check_loader_condition(addr, values, ctx, "expiry", problems)
+    elif kind == "google_service_account_iam_member" and name == "operator_runner_impersonation":
+        if values.get("service_account_id") != (
+                f"projects/{PROJECT}/serviceAccounts/{RUNNER_EMAIL}"):
+            problems.append(f"{addr}: grant is not on the runner service account")
+        if values.get("role") != f"{ROLE_PREFIX}impersonate":
+            problems.append(f"{addr}: unexpected role")
+        member = values.get("member")
+        if not OPERATOR_RE.match(str(member)) or (
+                ctx.get("operator") is not None and member != ctx["operator"]):
+            problems.append(f"{addr}: member is not the single named operator")
+        unknown = rc["change"].get("after_unknown") or {}
+        if actions == ["create"] and (not isinstance(unknown, dict) or _has_unknown(
+                {k: v for k, v in unknown.items() if k not in ("id", "etag")})):
+            problems.append(f"{addr}: values other than id/etag are unknown at plan time")
+        expected = ctx.get("runner_condition")
+        if expected is not None:
+            _check_condition(addr, values, expected, problems)
+        elif not _loader_condition_shape_ok(values, "runner-expires-"):
+            problems.append(f"{addr}: must carry exactly one expiring runner condition")
     elif kind == "google_project_iam_audit_config":
         if values.get("service") != AUDIT_SERVICE:
             problems.append(f"{addr}: audit service must be {AUDIT_SERVICE}")
@@ -395,6 +434,20 @@ def _loader_context(plan: dict, variables: dict, problems: list[str], packet_id:
     return {"operator": operator, "loader_expiry_condition": loader_expiry_condition(expiry),
             "loader_objects_condition": objects, "expiry": expiry, "window_hours": hours,
             "packet_id": packet_id}
+
+
+def _runner_context(plan: dict, variables: dict, problems: list[str]) -> dict:
+    """runner-access: the single operator and the exact approved expiry."""
+    operator = (variables.get("operator_member") or {}).get("value")
+    expiry = (variables.get("runner_access_expiry") or {}).get("value")
+    if not OPERATOR_RE.match(str(operator)):
+        problems.append("variable operator_member is not a single user: principal")
+    if not (isinstance(expiry, str) and EXPIRY_RE.match(expiry)):
+        problems.append("variable runner_access_expiry is not a UTC RFC 3339 timestamp")
+        return {"operator": operator, "runner_condition": {"title": None}, "expiry": None}
+    return {"operator": operator, "runner_condition": runner_expiry_condition(expiry),
+            "expiry": expiry, "window_hours": _window(plan, expiry, "runner_access_expiry",
+                                                      problems)}
 
 
 def _access_context(plan: dict, variables: dict, problems: list[str]) -> dict:
@@ -495,6 +548,10 @@ LOADER_ETAG_DRIFT_BY_MODE = {
     "loader-revoke-partial": frozenset({RUNNER_GRANT, AUDIT_ADDRESS, LOADER_JOBS_GRANT,
                                         LOADER_OBJECTS_GRANT}),
 }
+# M8, kept separate so the M6 and M7C1 tables above are unchanged: after the M7D revocation,
+# the same strict project-policy etag exceptions as loader-identity, nothing more.
+RUNNER_ETAG_DRIFT_BY_MODE = {"runner-access": frozenset({RUNNER_GRANT, AUDIT_ADDRESS}),
+                             "runner-revoke": frozenset({RUNNER_GRANT, AUDIT_ADDRESS})}
 
 
 def etag_drift_problems(rc: dict, address: str) -> list[str]:
@@ -550,7 +607,7 @@ def _check_bootstrap(plan: dict, mode: str, iam: Path, packet_id: object = None,
         if identity_on is not True:
             problems.append("variable loader_identity_enabled must be true in loader modes")
     elif "loader_identity_enabled" in variables and identity_on is not False and not (
-            mode in ("access", "revoke") and identity_on is True):
+            mode in ("access", "revoke", *RUNNER_MODES) and identity_on is True):
         problems.append("variable loader_identity_enabled is not allowed in this mode")
     # M6 access/revoke after M7D: the loader identity may exist, unchanged, without grants.
     m6_existing = existing | (loader_identity if identity_on is True else set())
@@ -565,6 +622,8 @@ def _check_bootstrap(plan: dict, mode: str, iam: Path, packet_id: object = None,
         # Deletes are restricted further below to the expiring grants present in the plan.
         "loader-recovery": (set(), existing | loader_identity, set()),
         "loader-revoke-partial": (set(), existing | loader_identity, set()),
+        "runner-access": ({RUNNER_IMPERSONATION}, m6_existing, set()),
+        "runner-revoke": (set(), m6_existing, {RUNNER_IMPERSONATION}),
     }[mode]
     expected_vars = dict(EXPECTED_VARIABLES, provisioner_access_enabled=(mode == "access"))
     _check_variables(variables, expected_vars, problems)
@@ -578,14 +637,26 @@ def _check_bootstrap(plan: dict, mode: str, iam: Path, packet_id: object = None,
         ctx = _loader_context(plan, variables, problems, packet_id, bucket)
     elif mode in LOADER_MODES:
         _check_variables(variables, LOADER_OFF, problems)  # all present, all disabled
+    elif mode in RUNNER_MODES:
+        _check_variables(variables, LOADER_OFF, problems)  # loader stays revoked
     else:
         for name, value in LOADER_OFF.items():  # pre-M7C1 plans omit them entirely
+            if name in variables and variables[name].get("value") != value:
+                problems.append(f"variable {name} is not the approved value")
+    if mode == "runner-access":
+        _check_variables(variables, {"runner_access_enabled": True}, problems)
+        ctx = _runner_context(plan, variables, problems)
+    elif mode == "runner-revoke":
+        _check_variables(variables, RUNNER_OFF, problems)  # present and disabled
+    else:
+        for name, value in RUNNER_OFF.items():  # pre-M8 plans omit them entirely
             if name in variables and variables[name].get("value") != value:
                 problems.append(f"variable {name} is not the approved value")
     already_removed: set[str] = set()
     etag_drift: list[str] = []
     seen: set[str] = set()  # each tolerated address at most once; duplicates are rejected
-    tolerated = ETAG_DRIFT_BY_MODE.get(mode) or LOADER_ETAG_DRIFT_BY_MODE.get(mode, frozenset())
+    tolerated = (ETAG_DRIFT_BY_MODE.get(mode) or LOADER_ETAG_DRIFT_BY_MODE.get(mode)
+                 or RUNNER_ETAG_DRIFT_BY_MODE.get(mode, frozenset()))
     for rc in plan.get("resource_drift") or []:
         addr, actions = rc.get("address"), (rc.get("change") or {}).get("actions")
         if addr in seen:
@@ -593,6 +664,7 @@ def _check_bootstrap(plan: dict, mode: str, iam: Path, packet_id: object = None,
         elif ((mode == "revoke" and addr in ACCESS_ADDRESSES)
               or (mode == "loader-revoke" and addr in LOADER_GRANTS)
               or (mode in PARTIAL_GRANTS and addr in PARTIAL_GRANTS[mode])
+              or (mode == "runner-revoke" and addr == RUNNER_IMPERSONATION)
               ) and actions == ["delete"]:
             seen.add(addr)
             already_removed.add(addr)
@@ -628,14 +700,17 @@ def _check_bootstrap(plan: dict, mode: str, iam: Path, packet_id: object = None,
     if mode == "access":
         report.update(access_expiry=ctx.get("expiry"), window_hours=ctx.get("window_hours"),
                       accepted_etag_drift=sorted(etag_drift))
-    if mode in ("revoke", "loader-revoke", *PARTIAL_GRANTS):
+    if mode in ("revoke", "loader-revoke", "runner-revoke", *PARTIAL_GRANTS):
         report.update(already_removed=sorted(already_removed),
                       accepted_etag_drift=sorted(etag_drift))
     if mode in PARTIAL_GRANTS:
         report["absent_from_state"] = sorted(absent)
         report["live_iam_readback_required"] = True
-    if mode in ("loader-identity", "loader-access"):
+    if mode in ("loader-identity", "loader-access", "runner-access"):
         report["accepted_etag_drift"] = sorted(etag_drift)
+    if mode == "runner-access":
+        report.update(runner_access_expiry=ctx.get("expiry"),
+                      window_hours=ctx.get("window_hours"))
     if mode == "loader-access":
         report.update(loader_access_expiry=ctx.get("expiry"),
                       window_hours=ctx.get("window_hours"), packet_id=ctx.get("packet_id"),
@@ -649,8 +724,12 @@ def _classify(plan: dict, problems: list[str], check) -> dict:
         problems.append("plan errored")
     counts: dict[str, int] = {}
     created, unchanged, deleted = set(), set(), set()
+    addresses: set[str] = set()
     for rc in plan.get("resource_changes") or []:
         addr, actions = rc["address"], rc["change"]["actions"]
+        if addr in addresses:  # M8: never merge duplicate entries silently (all modes)
+            problems.append(f"{addr}: duplicate resource change")
+        addresses.add(addr)
         if rc.get("mode", "managed") != "managed":
             problems.append(f"{addr}: unexpected data source")
             continue

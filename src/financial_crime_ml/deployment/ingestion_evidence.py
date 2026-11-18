@@ -270,7 +270,7 @@ TABLE_FORBIDDEN = ("expirationTime", "view", "materializedView", "externalDataCo
                    "maxStaleness", "biglakeConfiguration", "tableReplicationInfo")
 # tables.get and job configurations may report the legacy SQL name for INT64.
 TYPE_ALIASES = {"INT64": {"INT64", "INTEGER"}, "STRING": {"STRING"},
-                "TIMESTAMP": {"TIMESTAMP"}}
+                "TIMESTAMP": {"TIMESTAMP"}, "DATE": {"DATE"}}  # DATE: M8 marts only
 
 
 def schema_problems(fields: object, schema: list[dict], label: str) -> list[str]:

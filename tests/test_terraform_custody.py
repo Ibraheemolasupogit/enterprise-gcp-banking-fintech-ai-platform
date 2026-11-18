@@ -512,6 +512,7 @@ def test_bootstrap_instance_count_is_11_with_audit_and_without_access():
     runtime = json.loads((ROOT / "infrastructure/iam/runtime_roles.json").read_text())
     loader_roles = json.loads((ROOT / "infrastructure/iam/loader_roles.json").read_text())
     always = gated_access = gated_audit = gated_loader_identity = gated_loader_access = 0
+    gated_runner_access = 0
     for kind, name in re.findall(r'^resource "(\w+)" "(\w+)"', text, re.M):
         body = text[text.index(f'resource "{kind}" "{name}"'):].split("\n}\n", 1)[0]
         # M7C1 loader resources: every one is gated off by default.
@@ -523,6 +524,8 @@ def test_bootstrap_instance_count_is_11_with_audit_and_without_access():
             gated_loader_access += 3  # the three input tables, only while access is enabled
         elif re.search(r"count\s+= local\.loader_access_count", body):
             gated_loader_access += 1
+        elif re.search(r"count\s+= local\.runner_access_count", body):
+            gated_runner_access += 1  # M8: operator -> runner token minting, off by default
         elif "for_each" in body:
             always += len(runtime)
         elif re.search(r"count\s+= local\.access_count", body):
@@ -536,6 +539,7 @@ def test_bootstrap_instance_count_is_11_with_audit_and_without_access():
     assert always + gated_audit + gated_access == 13  # later access window
     # M7C1: the disabled baseline stays 11; loader identity adds 4, a loader window 6 more.
     assert (gated_loader_identity, gated_loader_access) == (4, 6)
+    assert gated_runner_access == 1  # M8: a runner window adds exactly one grant
     assert "loader_tables         = var.loader_access_enabled ? toset([" in text
 
 

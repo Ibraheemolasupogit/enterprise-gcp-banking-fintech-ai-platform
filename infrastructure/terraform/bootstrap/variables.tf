@@ -121,3 +121,31 @@ variable "loader_object_prefix" {
     error_message = "loader_object_prefix must be m7/ingestion/m7p-<24 hex>/ while loader access is enabled, and null otherwise."
   }
 }
+
+# ---- M8 temporary runner token minting; off/null by default ----
+
+variable "runner_access_enabled" {
+  type        = bool
+  default     = false
+  description = "Grants the single named operator token minting on the runner account for one approved M8 window, expiring at runner_access_expiry. The runner's own permissions are unchanged. Never together with provisioner or loader access."
+  validation {
+    condition     = !var.runner_access_enabled || (!var.provisioner_access_enabled && !var.loader_access_enabled)
+    error_message = "Runner access must not overlap provisioner or loader access."
+  }
+}
+
+variable "runner_access_expiry" {
+  type        = string
+  default     = null
+  description = "UTC RFC 3339 expiry of the runner token-minting grant, after plan time and at most 8 hours later. Null while runner access is disabled."
+  validation {
+    condition = (
+      var.runner_access_expiry == null ? !var.runner_access_enabled : (
+        var.runner_access_enabled && can(regex("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$", var.runner_access_expiry))
+        ? timecmp(var.runner_access_expiry, plantimestamp()) > 0 && timecmp(var.runner_access_expiry, timeadd(plantimestamp(), "8h")) <= 0
+        : false
+      )
+    )
+    error_message = "When runner access is enabled, runner_access_expiry must be a UTC timestamp later than plan time and no more than 8 hours after it; otherwise null."
+  }
+}
