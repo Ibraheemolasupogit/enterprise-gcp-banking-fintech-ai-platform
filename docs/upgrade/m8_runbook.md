@@ -1,6 +1,6 @@
 # M8 runbook: build the four analytics marts in the GCP pilot
 
-Prepared offline on 2026-11-17 at `a34cce3`. **Nothing in this runbook has been executed.** Live execution needs the separately approved runner access window in §1. It builds `transaction_daily`, `customer_daily`, `account_daily` and `operations_daily` in `bankpilot_dev` from the three input tables that M7D loaded ([M7D closure](m7d_closure.md)). It implements the retained [C-marts design](../gcp_pilot_plan.md#c-marts-mart-processing-m8-prepared-offline-not-authorised). The operator runs every step by hand in Terminal.app, never in Claude Code.
+Prepared offline on 2026-11-17 at `a34cce3`. **Executed by the operator on 2026-11-18; see the [M8 closure](m8_closure.md).** It builds `transaction_daily`, `customer_daily`, `account_daily` and `operations_daily` in `bankpilot_dev` from the three input tables that M7D loaded ([M7D closure](m7d_closure.md)). It implements the retained [C-marts design](../gcp_pilot_plan.md#c-marts-mart-processing-m8-executed-2026-11-18). The operator runs every step by hand in Terminal.app, never in Claude Code.
 
 ## 1. Runner access window (prepared offline; needs its own approvals)
 

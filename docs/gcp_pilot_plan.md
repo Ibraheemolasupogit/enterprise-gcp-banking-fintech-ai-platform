@@ -14,8 +14,8 @@ This runbook governs pilot infrastructure/workload operations. All cloud and Ter
 | Gate A: bootstrap, state custody, saved plans | **Complete.** IAM bootstrap applied and verified ([M6Q](upgrade/m6q_validation.md), [M6R](upgrade/m6r_validation.md)); local backends and encrypted OneDrive backups in use ([M6L](upgrade/m6l_validation.md)–[M6O](upgrade/m6o_validation.md)) |
 | Gate B: infrastructure | **Complete.** All **18 pilot resources deployed**: 17 in M6S, and the dataset IAM policy in the M6T recovery (1 created, 0 changed, 0 destroyed). Dataset access read back as named user OWNER plus the runner's metadata role only ([M6T](upgrade/m6t_validation.md)) |
 | Provisioner access | **Revoked** (2 grants destroyed); impersonation denied afterwards; temporary access-window input removed |
-| State backups | Pilot serial 21 and bootstrap serial 56 (after M7D revocation), encrypted and verified after a OneDrive round-trip |
-| Gate C: synthetic workload | **Inputs loaded, closed with limitations (M7D, 2026-11-17).** 4,250 rows in the three input tables, byte-identical to the packet; all six loader grants revoked and read back; marts empty (M8). A10 `pilot-loaded` blocked (no provisioner window), L5 probes inconclusive, bucket/dataset policy read-back outstanding ([M7D closure](upgrade/m7d_closure.md); [incident](upgrade/m7d_incident_table_iam.md)) |
+| State backups | Pilot serial 21 and bootstrap serial 60 (after M8 runner revocation), encrypted and verified after a OneDrive round-trip |
+| Gate C: synthetic workload | **Inputs (M7D, 2026-11-17) and marts (M8, 2026-11-18) loaded; closed with limitations.** 4,250 rows in the three input tables, byte-identical to the packet; all six loader grants revoked and read back; marts built in M8 (11,914 rows, [M8 closure](upgrade/m8_closure.md)). A10 `pilot-loaded` blocked (no provisioner window), L5 probes inconclusive, bucket/dataset policy read-back outstanding ([M7D closure](upgrade/m7d_closure.md); [incident](upgrade/m7d_incident_table_iam.md)) |
 | Gate D: cleanup | Not started; resources remain under deletion protection |
 
 Open limitations, including the unmapped numeric service-account identity in the 8 `GenerateAccessToken` audit entries, are listed in [M6T](upgrade/m6t_validation.md#outstanding-limitations). **This pilot is not production-ready and performs no cloud data ingestion.**
@@ -44,7 +44,7 @@ Capture resource IDs, effective IAM (including inheritance), schema exports and 
 
 **Rewritten in M7C2 (2026-11-13).** Gate C now has two parts:
 - **C-inputs (M7):** load the three input tables. Prepared offline; it runs only as M7D, under the [M7D runbook](upgrade/m7d_runbook.md).
-- **C-marts (M8):** build the four marts. Prepared offline ([M8 runbook](upgrade/m8_runbook.md)); **not authorised**; it needs an approved runner access window (§1 of the runbook).
+- **C-marts (M8):** build the four marts. Executed 2026-11-18 ([M8 closure](upgrade/m8_closure.md)).
 
 The earlier text named the provisioner as uploader and loader. That contradicted its M6K role, which has no data or job permissions, and has been removed (gap G7).
 
@@ -96,9 +96,9 @@ The earlier text named the provisioner as uploader and loader. That contradicted
 
 **Stop rules:** stop on any permission error, unexpected value or extra job. Never widen a role, retry with different settings, or delete inside the window. A wrong but successful load is recovered only by a separately reviewed operation (M7A G9).
 
-### C-marts: mart processing (M8; prepared offline, not authorised)
+### C-marts: mart processing (M8; executed 2026-11-18)
 
-**M8 (2026-11-17):** implemented and tested offline ([M8 runbook](upgrade/m8_runbook.md)). Runner access is a separate, off-by-default, expiring operator-to-runner token-minting window in the bootstrap root, with its own checker modes, an independent verifier and live denial checks. Not executed or authorised. The design below is retained and still needs its own review and approvals. **The runner**, not the loader or provisioner, would execute it after all loader access is revoked.
+**M8:** executed on 2026-11-18 ([closure](upgrade/m8_closure.md)); implemented and tested offline ([M8 runbook](upgrade/m8_runbook.md)). Runner access is a separate, off-by-default, expiring operator-to-runner token-minting window in the bootstrap root, with its own checker modes, an independent verifier and live denial checks. The design below is retained as the reference for that run. **The runner**, not the loader or provisioner, executed it after all loader access was revoked.
 
 - **Rendering and validation:** render only the approved project/dataset identifiers into `marts.v1.insert.proposed.sql` (identifiers cannot be query parameters). Validate and estimate the four SELECT bodies individually before DML, because script dry runs have limitations. Require exact expected fields and grains, with no approximation.
 - **Byte and job ledger:**
